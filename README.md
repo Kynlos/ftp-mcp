@@ -710,7 +710,7 @@ Ignored: 47  ← Files filtered by ignore patterns
 
 ## License
 
-MIT
+[MIT](LICENSE)
 
 ---
 
