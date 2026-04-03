@@ -1,0 +1,5 @@
+node_modules/
+.ftpconfig
+*.log
+.DS_Store
+Test/

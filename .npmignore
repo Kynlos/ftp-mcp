@@ -1,0 +1,21 @@
+# Git
+.git/
+.gitignore
+
+# Development
+.ftpconfig
+.vscode/
+.idea/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+Test/
+coverage/
+.nyc_output/

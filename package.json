@@ -1,0 +1,83 @@
+{
+  "name": "ftp-mcp",
+  "version": "1.0.1",
+  "description": "MCP server providing enhanced FTP/SFTP operations with smart sync, search, and direct file access for AI assistants",
+  "type": "module",
+  "main": "index.js",
+  "bin": {
+    "ftp-mcp": "./index.js",
+    "ftp-mcp-server": "./index.js"
+  },
+  "files": [
+    "index.js",
+    "README.md",
+    "LICENSE",
+    ".ftpconfig.example"
+  ],
+  "scripts": {
+    "start": "node index.js"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "ftp",
+    "sftp",
+    "file-transfer",
+    "sync",
+    "deploy",
+    "ai",
+    "llm",
+    "assistant",
+    "server",
+    "tools",
+    "claude",
+    "claude-mcp",
+    "claude-ftp",
+    "cline",
+    "cline-mcp",
+    "cline-ftp",
+    "cursor",
+    "cursor-mcp",
+    "cursor-ftp",
+    "windsurf",
+    "windsurf-mcp",
+    "roo",
+    "roo-code",
+    "roo-mcp",
+    "copilot",
+    "github-copilot",
+    "amp",
+    "amp-mcp",
+    "openai",
+    "anthropic",
+    "agentic",
+    "ai-tools",
+    "mcp-server",
+    "mcp-tools"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "author": {
+    "name": "Kynlo Akari",
+    "url": "https://github.com/Kynlos/"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Kynlos/ftp-mcp.git"
+  },
+  "homepage": "https://github.com/Kynlos/ftp-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/Kynlos/ftp-mcp/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "basic-ftp": "^5.0.5",
+    "minimatch": "^10.0.3",
+    "ssh2-sftp-client": "^11.0.0"
+  }
+}

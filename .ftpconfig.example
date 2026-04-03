@@ -1,0 +1,48 @@
+{
+  "production": {
+    "host": "ftp.example.com",
+    "user": "your-username",
+    "password": "your-password",
+    "port": 21,
+    "secure": false
+  },
+  "staging": {
+    "host": "sftp://staging.example.com",
+    "user": "staging-user",
+    "password": "staging-password",
+    "port": 22
+  },
+  "default": {
+    "host": "ftp.mysite.com",
+    "user": "default-user",
+    "password": "default-password"
+  },
+  "deployments": {
+    "deploy-frontend": {
+      "profile": "production",
+      "local": "./dist",
+      "remote": "/public_html",
+      "description": "Deploy frontend build to production",
+      "exclude": [
+        "*.map",
+        "*.test.js",
+        "test/**"
+      ]
+    },
+    "deploy-api": {
+      "profile": "production",
+      "local": "./api/build",
+      "remote": "/api",
+      "description": "Deploy API to production server"
+    },
+    "deploy-staging": {
+      "profile": "staging",
+      "local": "./dist",
+      "remote": "/www/staging",
+      "description": "Deploy to staging environment",
+      "exclude": [
+        "*.map"
+      ]
+    }
+  }
+}
