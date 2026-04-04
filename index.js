@@ -9,38 +9,73 @@ import {
 import { Client as FTPClient } from "basic-ftp";
 import SFTPClient from "ssh2-sftp-client";
 import fs from "fs/promises";
+import { readFileSync } from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import { Readable, Writable } from "stream";
-import { minimatch } from "minimatch";
+import ignore from "ignore";
+import * as diff from "diff";
+import { z } from "zod";
+import "dotenv/config";
+import { Writable, Readable } from "stream";
 
 // --init: scaffold .ftpconfig.example into the user's current working directory
 if (process.argv.includes("--init")) {
-  const __dirname = path.dirname(fileURLToPath(import.meta.url));
-  const exampleSrc = path.join(__dirname, ".ftpconfig.example");
-  const destExample = path.join(process.cwd(), ".ftpconfig.example");
-  const destConfig  = path.join(process.cwd(), ".ftpconfig");
-
   try {
-    await fs.copyFile(exampleSrc, destExample);
-    console.log(`✅ Created .ftpconfig.example in ${process.cwd()}`);
-
-    // Only create .ftpconfig if one doesn't already exist
-    try {
-      await fs.access(destConfig);
-      console.log(`ℹ️  .ftpconfig already exists — leaving it untouched.`);
-    } catch {
-      await fs.copyFile(exampleSrc, destConfig);
-      console.log(`✅ Created .ftpconfig — fill in your credentials and you're ready to go!`);
+    const { intro, outro, text, password: promptPassword, select, confirm, note } = await import("@clack/prompts");
+    
+    intro('🚀 Welcome to Flowdex MCP Initialization Wizard');
+    
+    const host = await text({
+      message: 'Enter your FTP/SFTP Host (e.g. sftp://ftp.example.com)',
+      placeholder: 'sftp://127.0.0.1',
+      validate: (val) => val.length === 0 ? "Host is required!" : undefined,
+    });
+    
+    const user = await text({
+      message: 'Enter your Username',
+      validate: (val) => val.length === 0 ? "User is required!" : undefined,
+    });
+    
+    const pass = await promptPassword({
+      message: 'Enter your Password (optional if using keys)',
+    });
+    
+    const port = await text({
+      message: 'Enter port (optional, defaults to 21 for FTP, 22 for SFTP)',
+      placeholder: '22'
+    });
+    
+    const isSFTP = host.startsWith('sftp://');
+    let privateKey = '';
+    
+    if (isSFTP) {
+      const usesKey = await confirm({ message: 'Are you using an SSH Private Key instead of a password?'});
+      if (usesKey) {
+        privateKey = await text({
+          message: 'Path to your private key (e.g. ~/.ssh/id_rsa)',
+        });
+      }
     }
-
-    console.log(`\nNext steps:`);
-    console.log(`  1. Edit .ftpconfig with your FTP/SFTP credentials`);
-    console.log(`  2. Add ftp-mcp to your MCP client config (see README)`);
-    console.log(`  3. Done! Ask your AI to "list files on my FTP server"\n`);
+    
+    const config = {
+      default: {
+        host: host,
+        user: user,
+      }
+    };
+    
+    if (pass) config.default.password = pass;
+    if (port) config.default.port = parseInt(port, 10);
+    if (privateKey) config.default.privateKey = privateKey;
+    
+    const destConfig  = path.join(process.cwd(), ".ftpconfig");
+    await fs.writeFile(destConfig, JSON.stringify(config, null, 2), 'utf8');
+    
+    note(`✅ Successfully generated config file at:\n${destConfig}`, 'Success');
+    
+    outro("You're ready to deploy with MCP! Ask your AI to 'list remote files'");
   } catch (err) {
     console.error(`❌ Init failed: ${err.message}`);
-    process.exit(1);
   }
   process.exit(0);
 }
@@ -108,17 +143,27 @@ async function loadIgnorePatterns(localPath) {
 function shouldIgnore(filePath, ignorePatterns, basePath) {
   const relativePath = path.relative(basePath, filePath).replace(/\\/g, '/');
   
-  for (const pattern of ignorePatterns) {
-    if (minimatch(relativePath, pattern, { dot: true, matchBase: true })) {
-      return true;
-    }
-    if (minimatch(path.basename(filePath), pattern, { dot: true })) {
-      return true;
-    }
+  if (!ignorePatterns._ig) {
+    Object.defineProperty(ignorePatterns, '_ig', {
+      value: ignore().add(ignorePatterns),
+      enumerable: false
+    });
   }
   
-  return false;
+  return ignorePatterns._ig.ignores(relativePath);
 }
+
+const ProfileConfigSchema = z.object({
+  host: z.string().min(1, "Hostname is required"),
+  user: z.string().min(1, "Username is required"),
+  password: z.string().optional(),
+  port: z.union([z.string(), z.number()]).optional(),
+  secure: z.union([z.boolean(), z.literal("implicit")]).optional(),
+  readOnly: z.boolean().optional(),
+  privateKey: z.string().optional(),
+  passphrase: z.string().optional(),
+  agent: z.string().optional()
+}).passthrough();
 
 async function loadFTPConfig(profileName = null, forceEnv = false) {
   if (forceEnv) {
@@ -138,20 +183,20 @@ async function loadFTPConfig(profileName = null, forceEnv = false) {
     if (profileName) {
       if (config[profileName]) {
         currentProfile = profileName;
-        return config[profileName];
+        return ProfileConfigSchema.parse(config[profileName]);
       }
       throw new Error(`Profile "${profileName}" not found in .ftpconfig`);
     }
 
     if (config.default) {
       currentProfile = 'default';
-      return config.default;
+      return ProfileConfigSchema.parse(config.default);
     }
 
-    const profiles = Object.keys(config);
+    const profiles = Object.keys(config).filter(k => k !== 'deployments');
     if (profiles.length > 0) {
       currentProfile = profiles[0];
-      return config[profiles[0]];
+      return ProfileConfigSchema.parse(config[profiles[0]]);
     }
 
     throw new Error('No profiles found in .ftpconfig');
@@ -193,13 +238,113 @@ async function connectFTP(config) {
 
 async function connectSFTP(config) {
   const client = new SFTPClient();
-  await client.connect({
+  const connSettings = {
     host: config.host.replace('sftp://', ''),
     port: getPort(config.host, config.port),
     username: config.user,
     password: config.password
-  });
+  };
+  
+  if (config.privateKey) connSettings.privateKey = readFileSync(path.resolve(config.privateKey), 'utf8');
+  if (config.passphrase) connSettings.passphrase = config.passphrase;
+  if (config.agent) connSettings.agent = config.agent;
+
+  await client.connect(connSettings);
   return client;
+}
+
+const connectionPool = new Map();
+const dirCache = new Map();
+const CACHE_TTL = 15000;
+
+function getPoolKey(config) {
+  return `${config.host}:${getPort(config.host, config.port)}:${config.user}`;
+}
+
+function getCached(poolKey, type, path) {
+  const entry = dirCache.get(`${poolKey}:${type}:${path}`);
+  if (entry && Date.now() - entry.timestamp < CACHE_TTL) return entry.data;
+  return null;
+}
+
+function setCached(poolKey, type, path, data) {
+  dirCache.set(`${poolKey}:${type}:${path}`, { timestamp: Date.now(), data });
+}
+
+function invalidatePoolCache(poolKey) {
+  for (const key of dirCache.keys()) {
+    if (key.startsWith(`${poolKey}:`)) {
+      dirCache.delete(key);
+    }
+  }
+}
+
+async function getClient(config) {
+  const poolKey = getPoolKey(config);
+  let existing = connectionPool.get(poolKey);
+  
+  if (existing && !existing.closed) {
+    if (existing.idleTimeout) clearTimeout(existing.idleTimeout);
+    return existing.client;
+  }
+
+  const useSFTP = isSFTP(config.host);
+  const client = useSFTP ? await connectSFTP(config) : await connectFTP(config);
+  
+  client._isSFTP = useSFTP;
+  const onClose = () => handleClientClose(poolKey);
+  
+  if (useSFTP) {
+    client.on('end', onClose);
+    client.on('error', onClose);
+    client.on('close', onClose);
+  } else {
+    client.ftp.socket.on('close', onClose);
+    client.ftp.socket.on('error', onClose);
+  }
+
+  connectionPool.set(poolKey, { client, closed: false });
+  return client;
+}
+
+function handleClientClose(poolKey) {
+  const existing = connectionPool.get(poolKey);
+  if (existing) {
+    existing.closed = true;
+    connectionPool.delete(poolKey);
+  }
+}
+
+async function auditLog(toolName, args, status, user, errorMsg = null) {
+  try {
+    const logEntry = {
+      timestamp: new Date().toISOString(),
+      tool: toolName,
+      user: user || 'system',
+      status,
+      arguments: args,
+      error: errorMsg
+    };
+    await fs.appendFile(path.join(process.cwd(), '.ftp-mcp-audit.log'), JSON.stringify(logEntry) + '\n', 'utf8');
+  } catch (e) {
+    // safely ignore audit log failures for now
+  }
+}
+
+function releaseClient(config) {
+  const poolKey = getPoolKey(config);
+  const existing = connectionPool.get(poolKey);
+  if (existing && !existing.closed) {
+    if (existing.idleTimeout) clearTimeout(existing.idleTimeout);
+    existing.idleTimeout = setTimeout(async () => {
+      existing.closed = true;
+      try {
+        if (existing.client._isSFTP) await existing.client.end();
+        else existing.client.close();
+      } catch (e) {}
+      connectionPool.delete(poolKey);
+    }, 60000).unref();
+  }
 }
 
 async function getTreeRecursive(client, useSFTP, remotePath, depth = 0, maxDepth = 10) {
@@ -230,7 +375,7 @@ async function getTreeRecursive(client, useSFTP, remotePath, depth = 0, maxDepth
   return results;
 }
 
-async function syncFiles(client, useSFTP, localPath, remotePath, direction, ignorePatterns = null, basePath = null, extraExclude = []) {
+async function syncFiles(client, useSFTP, localPath, remotePath, direction, ignorePatterns = null, basePath = null, extraExclude = [], dryRun = false) {
   const stats = { uploaded: 0, downloaded: 0, skipped: 0, errors: [], ignored: 0 };
   
   if (ignorePatterns === null) {
@@ -256,12 +401,14 @@ async function syncFiles(client, useSFTP, localPath, remotePath, direction, igno
       
       try {
         if (file.isDirectory()) {
-          if (useSFTP) {
-            await client.mkdir(remoteFilePath, true);
-          } else {
-            await client.ensureDir(remoteFilePath);
+          if (!dryRun) {
+            if (useSFTP) {
+              await client.mkdir(remoteFilePath, true);
+            } else {
+              await client.ensureDir(remoteFilePath);
+            }
           }
-          const subStats = await syncFiles(client, useSFTP, localFilePath, remoteFilePath, direction, ignorePatterns, basePath, extraExclude);
+          const subStats = await syncFiles(client, useSFTP, localFilePath, remoteFilePath, direction, ignorePatterns, basePath, extraExclude, dryRun);
           stats.uploaded += subStats.uploaded;
           stats.downloaded += subStats.downloaded;
           stats.skipped += subStats.skipped;
@@ -288,10 +435,12 @@ async function syncFiles(client, useSFTP, localPath, remotePath, direction, igno
           }
           
           if (shouldUpload) {
-            if (useSFTP) {
-              await client.put(localFilePath, remoteFilePath);
-            } else {
-              await client.uploadFrom(localFilePath, remoteFilePath);
+            if (!dryRun) {
+              if (useSFTP) {
+                await client.put(localFilePath, remoteFilePath);
+              } else {
+                await client.uploadFrom(localFilePath, remoteFilePath);
+              }
             }
             stats.uploaded++;
           }
@@ -370,6 +519,16 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: "string",
               description: "Remote path to list (defaults to current directory)",
               default: "."
+            },
+            limit: {
+              type: "number",
+              description: "Maximum number of files to return",
+              default: 100
+            },
+            offset: {
+              type: "number",
+              description: "Number of files to skip over",
+              default: 0
             }
           }
         }
@@ -383,9 +542,49 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             path: {
               type: "string",
               description: "Remote file path to read"
+            },
+            startLine: {
+              type: "number",
+              description: "Optional start line for reading chunk (1-indexed)"
+            },
+            endLine: {
+              type: "number",
+              description: "Optional end line for reading chunk (inclusive, 1-indexed)"
             }
           },
           required: ["path"]
+        }
+      },
+      {
+        name: "ftp_patch_file",
+        description: "Apply a Unified Diff patch to a remote file",
+        inputSchema: {
+          type: "object",
+          properties: {
+            path: {
+              type: "string",
+              description: "Remote file path to patch"
+            },
+            patch: {
+              type: "string",
+              description: "Unified diff string containing the changes"
+            }
+          },
+          required: ["path", "patch"]
+        }
+      },
+      {
+        name: "ftp_analyze_workspace",
+        description: "Semantically analyze a remote directory to detect project type and dependencies",
+        inputSchema: {
+          type: "object",
+          properties: {
+            path: {
+              type: "string",
+              description: "Remote directory path to analyze (defaults to current)",
+              default: "."
+            }
+          }
         }
       },
       {
@@ -467,6 +666,16 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: "string",
               description: "Remote path to search in",
               default: "."
+            },
+            limit: {
+              type: "number",
+              description: "Maximum results to return",
+              default: 50
+            },
+            offset: {
+              type: "number",
+              description: "Results to skip over",
+              default: 0
             }
           },
           required: ["pattern"]
@@ -553,6 +762,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               description: "Sync direction: 'upload', 'download', or 'both'",
               enum: ["upload", "download", "both"],
               default: "upload"
+            },
+            dryRun: {
+              type: "boolean",
+              description: "If true, simulates the sync without transferring files",
+              default: false
             }
           },
           required: ["localPath", "remotePath"]
@@ -763,7 +977,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       currentProfile = deployConfig.profile;
       
       const useSFTP = isSFTP(currentConfig.host);
-      const client = useSFTP ? await connectSFTP(currentConfig) : await connectFTP(currentConfig);
+      const client = await getClient(currentConfig);
       
       try {
         const localPath = path.resolve(deployConfig.local);
@@ -785,11 +999,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }]
         };
       } finally {
-        if (useSFTP) {
-          await client.end();
-        } else {
-          client.close();
-        }
+        releaseClient(currentConfig);
       }
     } catch (error) {
       return {
@@ -804,12 +1014,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const { profile, useEnv } = request.params.arguments || {};
       currentConfig = await loadFTPConfig(profile, useEnv);
       
-      if (!currentConfig.host || !currentConfig.user || !currentConfig.password) {
+      if (!currentConfig.host || !currentConfig.user) {
         return {
           content: [
             {
               type: "text",
-              text: "Error: FTP credentials not configured. Please set FTPMCP_HOST, FTPMCP_USER, and FTPMCP_PASSWORD environment variables or create a .ftpconfig file."
+              text: "Error: FTP credentials not configured. Please set FTPMCP_HOST, FTPMCP_USER environment variables or create a .ftpconfig file."
             }
           ]
         };
@@ -844,7 +1054,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
   }
 
-  if (!currentConfig.host || !currentConfig.user || !currentConfig.password) {
+  if (!currentConfig.host || !currentConfig.user) {
     return {
       content: [
         {
@@ -859,34 +1069,54 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   let client;
 
   try {
-    client = useSFTP ? await connectSFTP(currentConfig) : await connectFTP(currentConfig);
+    client = await getClient(currentConfig);
+    const poolKey = getPoolKey(currentConfig);
+    const cmdName = request.params.name;
+    const isDestructive = ["ftp_deploy", "ftp_put_contents", "ftp_batch_upload", "ftp_sync", "ftp_upload", "ftp_delete", "ftp_mkdir", "ftp_rmdir", "ftp_chmod", "ftp_rename", "ftp_copy", "ftp_patch_file"].includes(cmdName);
+    
+    if (isDestructive) {
+      if (currentConfig.readOnly) {
+        const errorResp = {
+          content: [{ type: "text", text: `Error: Profile '${currentProfile}' is configured in readOnly mode. Destructive actions are disabled.` }],
+          isError: true
+        };
+        await auditLog(cmdName, request.params.arguments, 'failed', currentProfile, 'readOnly mode violation');
+        return errorResp;
+      }
+      invalidatePoolCache(poolKey);
+    }
 
-    switch (request.params.name) {
+    const response = await (async () => {
+      switch (cmdName) {
       case "ftp_list": {
         const path = request.params.arguments?.path || ".";
-        let files;
+        const limit = request.params.arguments?.limit || 100;
+        const offset = request.params.arguments?.offset || 0;
         
-        if (useSFTP) {
-          files = await client.list(path);
-          const formatted = files.map(f => 
-            `${f.type === 'd' ? 'DIR' : 'FILE'} ${f.name} (${f.size} bytes, ${f.rights?.user}${f.rights?.group}${f.rights?.other})`
-          ).join('\n');
-          return {
-            content: [{ type: "text", text: formatted || "Empty directory" }]
-          };
-        } else {
-          files = await client.list(path);
-          const formatted = files.map(f => 
-            `${f.isDirectory ? 'DIR' : 'FILE'} ${f.name} (${f.size} bytes)`
-          ).join('\n');
-          return {
-            content: [{ type: "text", text: formatted || "Empty directory" }]
-          };
+        let files = getCached(poolKey, 'LIST', path);
+        if (!files) {
+          files = useSFTP ? await client.list(path) : await client.list(path);
+          files.sort((a,b) => a.name.localeCompare(b.name));
+          setCached(poolKey, 'LIST', path, files);
         }
+        
+        const total = files.length;
+        const sliced = files.slice(offset, offset + limit);
+        
+        const formatted = sliced.map(f => {
+          const type = (useSFTP ? f.type === 'd' : f.isDirectory) ? 'DIR ' : 'FILE';
+          const rights = useSFTP && f.rights ? `, ${f.rights.user || ''}${f.rights.group || ''}${f.rights.other || ''}` : '';
+          return `${type} ${f.name} (${f.size} bytes${rights})`;
+        }).join('\n');
+        
+        const paginationInfo = `\n\nShowing ${offset + 1} to ${Math.min(offset + limit, total)} of ${total} items.`;
+        return {
+          content: [{ type: "text", text: (formatted || "Empty directory") + (total > limit ? paginationInfo : '') }]
+        };
       }
 
       case "ftp_get_contents": {
-        const { path } = request.params.arguments;
+        const { path, startLine, endLine } = request.params.arguments;
         let content;
         
         if (useSFTP) {
@@ -905,8 +1135,60 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content = Buffer.concat(chunks).toString('utf8');
         }
         
+        if (startLine || endLine) {
+          const lines = content.split('\n');
+          const start = Math.max((startLine || 1) - 1, 0);
+          const end = endLine ? Math.min(endLine, lines.length) : lines.length;
+          const totalLength = lines.length;
+          
+          content = lines.slice(start, end).join('\n');
+          content = `... Showing lines ${start + 1} to ${end} of ${totalLength} ...\n${content}`;
+        }
+        
         return {
           content: [{ type: "text", text: content }]
+        };
+      }
+
+      case "ftp_patch_file": {
+        const { path, patch } = request.params.arguments;
+        
+        let content;
+        try {
+          if (useSFTP) {
+            const buffer = await client.get(path);
+            content = buffer.toString('utf8');
+          } else {
+            const chunks = [];
+            const stream = new Writable({ write(chunk, encoding, callback) { chunks.push(chunk); callback(); } });
+            await client.downloadTo(stream, path);
+            content = Buffer.concat(chunks).toString('utf8');
+          }
+        } catch (e) {
+          return {
+            content: [{ type: "text", text: `Error: File not found or unreadable. ${e.message}` }],
+            isError: true
+          };
+        }
+        
+        const patchedContent = diff.applyPatch(content, patch);
+        if (patchedContent === false) {
+          return {
+            content: [{ type: "text", text: `Error: Failed to apply patch cleanly. Diff may be malformed or out of date with remote file.` }],
+            isError: true
+          };
+        }
+        
+        if (useSFTP) {
+          const buffer = Buffer.from(patchedContent, 'utf8');
+          await client.put(buffer, path);
+        } else {
+          const readable = Readable.from([patchedContent]);
+          await client.uploadFrom(readable, path);
+        }
+        
+        return {
+          content: [{ type: "text", text: `Successfully patched ${path}` }]
         };
       }
 
@@ -993,7 +1275,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "ftp_tree": {
         const { path = ".", maxDepth = 10 } = request.params.arguments || {};
-        const tree = await getTreeRecursive(client, useSFTP, path, 0, maxDepth);
+        const cacheKey = `${path}:${maxDepth}`;
+        let tree = getCached(poolKey, 'TREE', cacheKey);
+        if (!tree) {
+          tree = await getTreeRecursive(client, useSFTP, path, 0, maxDepth);
+          setCached(poolKey, 'TREE', cacheKey, tree);
+        }
         
         const formatted = tree.map(item => {
           const indent = '  '.repeat((item.path.match(/\//g) || []).length);
@@ -1006,18 +1293,77 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "ftp_search": {
-        const { pattern, path = "." } = request.params.arguments;
-        const tree = await getTreeRecursive(client, useSFTP, path, 0, 10);
+        const { pattern, path = ".", limit = 50, offset = 0 } = request.params.arguments;
+        const cacheKey = `${path}:10`;
+        let tree = getCached(poolKey, 'TREE', cacheKey);
+        if (!tree) {
+          tree = await getTreeRecursive(client, useSFTP, path, 0, 10);
+          setCached(poolKey, 'TREE', cacheKey, tree);
+        }
         
         const regex = new RegExp(pattern.replace(/\*/g, '.*').replace(/\?/g, '.'));
         const matches = tree.filter(item => regex.test(item.name));
         
-        const formatted = matches.map(item => 
+        const total = matches.length;
+        const sliced = matches.slice(offset, offset + limit);
+        
+        const formatted = sliced.map(item => 
           `${item.path} (${item.isDirectory ? 'DIR' : item.size + ' bytes'})`
         ).join('\n');
         
+        const paginationInfo = `\n\nShowing ${offset + 1} to ${Math.min(offset + limit, total)} of ${total} matches.`;
         return {
-          content: [{ type: "text", text: formatted || "No matches found" }]
+          content: [{ type: "text", text: (formatted || "No matches found") + (total > limit ? paginationInfo : '') }]
+        };
+      }
+
+      case "ftp_analyze_workspace": {
+        const path = request.params.arguments?.path || ".";
+        let files = getCached(poolKey, 'LIST', path);
+        if (!files) {
+          files = useSFTP ? await client.list(path) : await client.list(path);
+          setCached(poolKey, 'LIST', path, files);
+        }
+        
+        const importantFiles = ['package.json', 'composer.json', 'requirements.txt', 'pyproject.toml', 'Cargo.toml', 'go.mod', 'README.md'];
+        const found = files.filter(f => importantFiles.includes(f.name));
+        
+        let summary = `Workspace Analysis for: ${path}\n============================\n\n`;
+        if (found.length === 0) {
+          summary += "No recognizable project configuration files found.";
+          return { content: [{ type: "text", text: summary }] };
+        }
+        
+        for (const file of found) {
+          const filePath = path === "." ? file.name : `${path}/${file.name}`;
+          try {
+            let content;
+            if (useSFTP) {
+              content = (await client.get(filePath)).toString('utf8');
+            } else {
+              const chunks = [];
+              const stream = new Writable({ write(c, e, cb) { chunks.push(c); cb(); } });
+              await client.downloadTo(stream, filePath);
+              content = Buffer.concat(chunks).toString('utf8');
+            }
+            
+            if (file.name === 'package.json' || file.name === 'composer.json') {
+              const parsed = JSON.parse(content);
+              summary += `[${file.name}]\nName: ${parsed.name || 'Unknown'}\nVersion: ${parsed.version || 'Unknown'}\n`;
+              if (parsed.dependencies || parsed.require) summary += `Dependencies: ${Object.keys(parsed.dependencies || parsed.require).slice(0, 10).join(', ')}...\n`;
+            } else if (file.name === 'README.md') {
+              summary += `[README.md (Preview)]\n${content.split('\n').filter(l => l.trim()).slice(0, 5).join('\n')}\n`;
+            } else {
+              summary += `[${file.name}]\n${content.split('\n').slice(0, 10).join('\n')}...\n`;
+            }
+            summary += '\n';
+          } catch (e) {
+            summary += `[${file.name}]\nCould not read file contents: ${e.message}\n\n`;
+          }
+        }
+        
+        return {
+          content: [{ type: "text", text: summary.trim() }]
         };
       }
 
@@ -1089,13 +1435,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "ftp_sync": {
-        const { localPath, remotePath, direction = "upload" } = request.params.arguments;
-        const stats = await syncFiles(client, useSFTP, localPath, remotePath, direction);
+        const { localPath, remotePath, direction = "upload", dryRun = false } = request.params.arguments;
+        const stats = await syncFiles(client, useSFTP, localPath, remotePath, direction, null, null, [], dryRun);
         
         return {
           content: [{
             type: "text",
-            text: `Sync complete:\nUploaded: ${stats.uploaded}\nDownloaded: ${stats.downloaded}\nSkipped: ${stats.skipped}\nIgnored: ${stats.ignored}\n${stats.errors.length > 0 ? '\nErrors:\n' + stats.errors.join('\n') : ''}`
+            text: `${dryRun ? '[DRY RUN] ' : ''}Sync complete:\nUploaded: ${stats.uploaded}\nDownloaded: ${stats.downloaded}\nSkipped: ${stats.skipped}\nIgnored: ${stats.ignored}\n${stats.errors.length > 0 ? '\nErrors:\n' + stats.errors.join('\n') : ''}`
           }]
         };
       }
@@ -1245,7 +1591,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [{ type: "text", text: `Unknown tool: ${request.params.name}` }],
           isError: true
         };
-    }
+      }
+    })();
+    
+    await auditLog(cmdName, request.params.arguments, response.isError ? 'failed' : 'success', currentProfile, response.isError ? response.content[0].text : null);
+    return response;
   } catch (error) {
     return {
       content: [{ type: "text", text: `Error: ${error.message}` }],
@@ -1253,11 +1603,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     };
   } finally {
     if (client) {
-      if (useSFTP) {
-        await client.end();
-      } else {
-        client.close();
-      }
+      releaseClient(currentConfig);
     }
   }
 });
