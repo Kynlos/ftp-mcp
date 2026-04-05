@@ -29,3 +29,8 @@ IMPROVEMENTS.md
 
 # Audit Logs
 .ftp-mcp-audit.log
+NEXT_STEPS.md 
+test/features.test.js 
+.ftp-mcp-snapshots 
+.ftp-mcp-sync-manifest.json 
+test-debug.md 

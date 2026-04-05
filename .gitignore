@@ -1,18 +1,20 @@
 node_modules/
 .ftpconfig
+.ftpconfig_*
 *.log
 .DS_Store
-# Test artifacts
-Test/
-test/
+
+# Test artifacts (Ignore dynamic files, but keep test code)
 coverage/
 .nyc_output/
 test_output.log
+.ftp-mcp-snapshots/
+.ftp-mcp-sync-manifest.json
+test-debug.md
 
 # Project Documentation
 IMPROVEMENTS.md
-*.tmp
-*.txt
+NEXT_STEPS.md
 
 # Audit Logs
 .ftp-mcp-audit.log

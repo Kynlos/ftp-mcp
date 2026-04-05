@@ -10,6 +10,9 @@
   },
   "files": [
     "index.js",
+    "policy-engine.js",
+    "snapshot-manager.js",
+    "sync-manifest.js",
     "README.md",
     "LICENSE",
     ".ftpconfig.example"
