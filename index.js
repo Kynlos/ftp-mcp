@@ -657,7 +657,7 @@ function generateSemanticPreview(filesToChange) {
 const server = new Server(
   {
     name: "ftp-mcp-server",
-    version: "1.2.0",
+    version: "1.2.1",
   },
   {
     capabilities: {

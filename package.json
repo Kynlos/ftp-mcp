@@ -1,6 +1,6 @@
 {
   "name": "ftp-mcp",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Enterprise-grade MCP server providing heavily optimized FTP/SFTP operations with smart sync, patch/chunk streaming, caching, and explicit read-only security mappings for AI code assistants.",
   "type": "module",
   "main": "index.js",
