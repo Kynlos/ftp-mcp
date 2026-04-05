@@ -86,7 +86,7 @@ export FTPMCP_AGENT="pageant"
 
 ### 3. Client Integration
 
-Register the MCP server directly to your AI Code Editor (Cursor, VSCode with Roo, Windsurf, or Amplitude).
+Register the MCP server directly to your AI Code Editor (Cursor, Cline, Claude Desktop, Windsurf, etc.).
 
 Example integration:
 - **Command:** `npx`
