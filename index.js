@@ -342,6 +342,14 @@ async function getClient(config) {
       telemetry.activeConnections++;
 
       client._isSFTP = useSFTP;
+      
+      // Silence MaxListenersExceededWarning during high-activity syncs/sessions
+      if (typeof client.setMaxListeners === 'function') {
+        client.setMaxListeners(100);
+      } else if (client.ftp && typeof client.ftp.socket.setMaxListeners === 'function') {
+        client.ftp.socket.setMaxListeners(100);
+      }
+
       const entry = {
         client,
         closed: false,
