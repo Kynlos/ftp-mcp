@@ -151,6 +151,10 @@ Deploy environments utilizing deep comparison trees via `ftp_sync`.
 - Audit Logging is continuously enabled. Ensure the terminal running the MCP protocol maintains structural write-permissions to the local project deployment folder.
 - Ensure any `currentConfig` caching resets are tied exclusively to `ftp_connect` profile pivoting.
 
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for a detailed list of changes in each release.
+
 ## License
 
 [MIT](LICENSE)

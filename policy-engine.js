@@ -10,7 +10,12 @@ export class PolicyEngine {
         if (!this.policies.allowedPaths || this.policies.allowedPaths.length === 0) {
             return true; // No restriction
         }
-        return this.policies.allowedPaths.some(allowed => filePath.startsWith(allowed));
+        return this.policies.allowedPaths.some(allowed => {
+            // Normalize: ensure trailing slash to prevent /var/www matching /var/www-evil
+            const normalizedAllowed = allowed.endsWith('/') ? allowed : allowed + '/';
+            const normalizedPath = filePath.endsWith('/') ? filePath : filePath + '/';
+            return normalizedPath.startsWith(normalizedAllowed) || filePath === allowed;
+        });
     }
 
     checkBlockedGlob(filePath) {

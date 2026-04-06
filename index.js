@@ -27,7 +27,7 @@ const CONFIG_FILE = process.env.FTP_CONFIG_PATH || path.join(process.cwd(), DEFA
 // --init: scaffold .ftpconfig.example into the user's current working directory
 if (process.argv.includes("--init")) {
   try {
-    const { intro, outro, text, password: promptPassword, select, confirm, note } = await import("@clack/prompts");
+    const { intro, outro, text, password: promptPassword, select, confirm, note, isCancel } = await import("@clack/prompts");
 
     intro('🚀 Welcome to FTP-MCP Initialization Wizard');
 
@@ -36,30 +36,35 @@ if (process.argv.includes("--init")) {
       placeholder: 'sftp://127.0.0.1',
       validate: (val) => val.length === 0 ? "Host is required!" : undefined,
     });
+    if (isCancel(host)) { outro('Setup cancelled.'); process.exit(0); }
 
     const user = await text({
       message: 'Enter your Username',
       validate: (val) => val.length === 0 ? "User is required!" : undefined,
     });
+    if (isCancel(user)) { outro('Setup cancelled.'); process.exit(0); }
 
     const pass = await promptPassword({
       message: 'Enter your Password (optional if using keys)',
     });
+    if (isCancel(pass)) { outro('Setup cancelled.'); process.exit(0); }
 
     const port = await text({
       message: 'Enter port (optional, defaults to 21 for FTP, 22 for SFTP)',
       placeholder: '22'
     });
+    if (isCancel(port)) { outro('Setup cancelled.'); process.exit(0); }
 
-    const isSFTP = host.startsWith('sftp://');
+    const isSFTP = typeof host === 'string' && host.startsWith('sftp://');
     let privateKey = '';
 
     if (isSFTP) {
       const usesKey = await confirm({ message: 'Are you using an SSH Private Key instead of a password?' });
-      if (usesKey) {
+      if (!isCancel(usesKey) && usesKey) {
         privateKey = await text({
           message: 'Path to your private key (e.g. ~/.ssh/id_rsa)',
         });
+        if (isCancel(privateKey)) { outro('Setup cancelled.'); process.exit(0); }
       }
     }
 
@@ -450,7 +455,7 @@ function releaseClient(config) {
 async function getTreeRecursive(client, useSFTP, remotePath, depth = 0, maxDepth = 10) {
   if (depth > maxDepth) return [];
 
-  const files = useSFTP ? await client.list(remotePath) : await client.list(remotePath);
+  const files = await client.list(remotePath);
   const results = [];
 
   for (const file of files) {
@@ -475,12 +480,13 @@ async function getTreeRecursive(client, useSFTP, remotePath, depth = 0, maxDepth
   return results;
 }
 
-async function syncFiles(client, useSFTP, localPath, remotePath, direction, ignorePatterns = null, basePath = null, extraExclude = [], dryRun = false, useManifest = true) {
+async function syncFiles(client, useSFTP, localPath, remotePath, direction, ignorePatterns = null, basePath = null, extraExclude = [], dryRun = false, useManifest = true, _isTopLevel = false) {
   const stats = { uploaded: 0, downloaded: 0, skipped: 0, errors: [], ignored: 0, filesToChange: [] };
 
   if (ignorePatterns === null) {
     ignorePatterns = await loadIgnorePatterns(localPath);
     basePath = localPath;
+    _isTopLevel = true;
     if (useManifest) await syncManifestManager.load();
   }
 
@@ -496,8 +502,8 @@ async function syncFiles(client, useSFTP, localPath, remotePath, direction, igno
       const remoteFilePath = `${remotePath}/${file.name}`;
 
       // In some environments (like Windows with ftp-srv), rapid transfers cause ECONNRESET.
-      // A slightly longer delay helps stabilize the socket state during sequence.
-      await new Promise(r => setTimeout(r, 250));
+      // A short delay helps stabilize the socket state during sequence (FTP only).
+      if (!useSFTP) await new Promise(r => setTimeout(r, 50));
 
       // Security check first so we can warn even if it's in .gitignore/.ftpignore
       if (isSecretFile(localFilePath)) {
@@ -602,7 +608,7 @@ async function syncFiles(client, useSFTP, localPath, remotePath, direction, igno
     }
   }
 
-  if (ignorePatterns === null && useManifest && !dryRun) {
+  if (_isTopLevel && useManifest && !dryRun) {
     await syncManifestManager.save();
   }
 
@@ -1182,8 +1188,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   if (request.params.name === "ftp_list_deployments") {
     try {
-      const configPath = path.join(process.cwd(), '.ftpconfig');
-      const configData = await fs.readFile(configPath, 'utf8');
+      const configData = await fs.readFile(CONFIG_FILE, 'utf8');
       const config = JSON.parse(configData);
 
       if (!config.deployments || Object.keys(config.deployments).length === 0) {
@@ -1216,8 +1221,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   if (request.params.name === "ftp_deploy") {
     try {
       const { deployment } = request.params.arguments;
-      const configPath = path.join(process.cwd(), '.ftpconfig');
-      const configData = await fs.readFile(configPath, 'utf8');
+      const configData = await fs.readFile(CONFIG_FILE, 'utf8');
       const config = JSON.parse(configData);
 
       if (!config.deployments || !config.deployments[deployment]) {
@@ -1376,7 +1380,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
           let files = getCached(poolKey, 'LIST', path);
           if (!files) {
-            files = useSFTP ? await client.list(path) : await client.list(path);
+            files = await client.list(path);
             files.sort((a, b) => a.name.localeCompare(b.name));
             setCached(poolKey, 'LIST', path, files);
           }
@@ -1655,7 +1659,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           let formatted = "";
 
           if (contentPattern) {
-            const contentRegex = new RegExp(contentPattern, 'gi');
+            const contentRegex = new RegExp(contentPattern, 'i');
             const contentMatches = [];
 
             for (const item of sliced) {
@@ -1703,7 +1707,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const path = request.params.arguments?.path || ".";
           let files = getCached(poolKey, 'LIST', path);
           if (!files) {
-            files = useSFTP ? await client.list(path) : await client.list(path);
+            files = await client.list(path);
             setCached(poolKey, 'LIST', path, files);
           }
 
@@ -2008,7 +2012,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             if (recursive) {
               await client.removeDir(path);
             } else {
-              await client.remove(path);
+              await client.send("RMD", path);
             }
           }
 
@@ -2045,11 +2049,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
           const txId = await snapshotManager.createSnapshot(client, useSFTP, [oldPath, newPath]);
 
-          if (useSFTP) {
-            await client.rename(oldPath, newPath);
-          } else {
-            await client.rename(oldPath, newPath);
-          }
+          await client.rename(oldPath, newPath);
 
           return {
             content: [{ type: "text", text: `Successfully renamed ${oldPath} to ${newPath}\nTransaction ID: ${txId}` }]
