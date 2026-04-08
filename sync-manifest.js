@@ -28,7 +28,7 @@ export class SyncManifestManager {
     async getFileHash(filePath) {
         try {
             const content = await fs.readFile(filePath);
-            return crypto.createHash('md5').update(content).digest('hex');
+            return crypto.createHash('sha256').update(content).digest('hex');
         } catch (e) {
             return null;
         }

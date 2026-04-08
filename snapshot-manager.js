@@ -3,6 +3,8 @@ import path from 'path';
 import crypto from 'crypto';
 import { Writable } from 'stream';
 
+const MAX_SNAPSHOTS = 50;
+
 export class SnapshotManager {
     constructor(baseDir = process.cwd()) {
         this.snapshotDir = path.join(baseDir, '.ftp-mcp-snapshots');
@@ -13,6 +15,24 @@ export class SnapshotManager {
             await fs.mkdir(this.snapshotDir, { recursive: true });
         } catch (e) {
             // Ignore if exists
+        }
+    }
+
+    async pruneOldSnapshots(maxToKeep = MAX_SNAPSHOTS) {
+        try {
+            const dirs = await fs.readdir(this.snapshotDir, { withFileTypes: true });
+            const txDirs = dirs
+                .filter(d => d.isDirectory() && d.name.startsWith('tx_'))
+                .map(d => ({ name: d.name, ts: parseInt(d.name.split('_')[1]) || 0 }))
+                .sort((a, b) => b.ts - a.ts);
+
+            if (txDirs.length > maxToKeep) {
+                for (const dir of txDirs.slice(maxToKeep)) {
+                    await fs.rm(path.join(this.snapshotDir, dir.name), { recursive: true, force: true });
+                }
+            }
+        } catch (e) {
+            // Ignore pruning errors
         }
     }
 
@@ -57,7 +77,7 @@ export class SnapshotManager {
                 }
 
                 if (isFile) {
-                    const localSnapshotPath = path.join(txDir, crypto.createHash('md5').update(remotePath).digest('hex'));
+                    const localSnapshotPath = path.join(txDir, crypto.createHash('sha256').update(remotePath).digest('hex'));
 
                     if (useSFTP) {
                         await client.get(remotePath, localSnapshotPath);
@@ -86,6 +106,9 @@ export class SnapshotManager {
             JSON.stringify(manifest, null, 2),
             'utf8'
         );
+
+        // Auto-prune old snapshots to prevent unbounded disk growth
+        await this.pruneOldSnapshots();
 
         return txId;
     }

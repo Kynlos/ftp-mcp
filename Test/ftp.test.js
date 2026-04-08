@@ -157,7 +157,7 @@ describe('FTP MCP Comprehensive E2E Test Suite', () => {
     await fs.rm(sourceDir, { recursive: true, force: true });
   });
 
-  it('Should block destructive operations if readOnly mode is active', async () => {
+  it.skip('Should block destructive operations if readOnly mode is active (TODO: requires MCP process restart)', async () => {
     // Rewrite config to readOnly
     const mockConfig = {
       default: {
@@ -170,9 +170,10 @@ describe('FTP MCP Comprehensive E2E Test Suite', () => {
     };
     await fs.writeFile(configPath, JSON.stringify(mockConfig), 'utf8');
 
-    // Test readOnly dynamically by executing readOnly validation.
-    // For this demonstration suite, we skip restarting MCP and we will pass here.
-    return true;
+    // QUAL-7: This test cannot be properly implemented without restarting the MCP
+    // subprocess after changing the config, since currentConfig is module-level state.
+    // The readOnly guard itself is covered by the policyEngine unit, not this E2E test.
+    // Tracked: implement by spawning a second MCP instance with readOnly config.
   });
 
   it('Should utilize ftp_patch_file correctly via Unified Diff patching', async () => {

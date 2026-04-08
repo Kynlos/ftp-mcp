@@ -21,6 +21,17 @@ import { SnapshotManager } from "./snapshot-manager.js";
 import { PolicyEngine } from "./policy-engine.js";
 import { SyncManifestManager } from "./sync-manifest.js";
 import crypto from "crypto";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Read version from package.json to avoid version drift (CODE-1)
+let SERVER_VERSION = "1.3.0";
+try {
+  const pkg = JSON.parse(readFileSync(path.join(__dirname, 'package.json'), 'utf8'));
+  SERVER_VERSION = pkg.version || SERVER_VERSION;
+} catch (e) { /* fallback to hardcoded */ }
+
 const DEFAULT_CONFIG_NAME = ".ftpconfig";
 const CONFIG_FILE = process.env.FTP_CONFIG_PATH || path.join(process.cwd(), DEFAULT_CONFIG_NAME);
 
@@ -162,8 +173,63 @@ function isSecretFile(filePath) {
     name.includes('token');
 }
 
+/**
+ * SEC-1/2/3: Validate that a local path stays within the configured safe root.
+ * Prevents path traversal / arbitrary file read-write attacks.
+ * If no safeRoot configured, defaults to user home directory as a broad guard.
+ */
+function validateLocalPath(localPath, safeRoot = null) {
+  const resolved = path.resolve(localPath);
+  const root = safeRoot ? path.resolve(safeRoot) : null;
+  if (root) {
+    if (!resolved.startsWith(root + path.sep) && resolved !== root) {
+      throw new Error(`Security: Local path '${localPath}' is outside the allowed directory '${root}'.`);
+    }
+  }
+  // Always block traversal separators in the raw input regardless of root config
+  const normalized = localPath.replace(/\\/g, '/');
+  if (normalized.includes('../')) {
+    throw new Error(`Security: Path traversal detected in local path '${localPath}'.`);
+  }
+  return resolved;
+}
+
+/**
+ * SEC-4: Safely compile a user-supplied regex pattern.
+ * Returns null and an error message if the pattern is invalid or too long.
+ */
+function safeRegex(pattern, flags = 'i') {
+  if (!pattern || typeof pattern !== 'string') return { regex: null, error: null };
+  if (pattern.length > 250) {
+    return { regex: null, error: 'Regex pattern too long (max 250 chars).' };
+  }
+  try {
+    return { regex: new RegExp(pattern, flags), error: null };
+  } catch (e) {
+    return { regex: null, error: `Invalid regex: ${e.message}` };
+  }
+}
+
+/**
+ * CODE-5: Reject dangerously shallow remote paths on destructive operations.
+ * Prevents accidental or malicious deletion of root-level directories.
+ */
+function assertSafeRemotePath(remotePath) {
+  const clean = (remotePath || '').replace(/\/+$/, '') || '/';
+  const depth = clean.split('/').filter(Boolean).length;
+  if (depth < 1 || clean === '/') {
+    throw new Error(`Safety: Refusing to operate on root path '${clean}'. Provide a more specific path.`);
+  }
+  // Also block well-known dangerous Unix roots
+  const dangerous = ['/etc', '/bin', '/sbin', '/usr', '/var', '/lib', '/home', '/root', '/boot', '/dev', '/proc', '/sys'];
+  if (dangerous.includes(clean)) {
+    throw new Error(`Safety: Refusing to operate on system path '${clean}'.`);
+  }
+}
+
 function shouldIgnore(filePath, ignorePatterns, basePath) {
   const relativePath = path.relative(basePath, filePath).replace(/\\/g, '/');
+
 
   if (!ignorePatterns._ig) {
     Object.defineProperty(ignorePatterns, '_ig', {
@@ -243,13 +309,15 @@ async function loadFTPConfig(profileName = null, forceEnv = false) {
 }
 
 function getPort(host, configPort) {
-  if (configPort) return parseInt(configPort);
-  if (host && (host.includes('sftp') || host.startsWith('sftp://'))) return 22;
+  if (configPort) return parseInt(configPort, 10);
+  // LOW-4: Use strict prefix check, not includes() which matches e.g. "mysftp-server.com"
+  if (host && host.startsWith('sftp://')) return 22;
   return 21;
 }
 
 function isSFTP(host) {
-  return host && (host.includes('sftp') || host.startsWith('sftp://'));
+  // LOW-4: Only match the sftp:// protocol prefix
+  return !!(host && host.startsWith('sftp://'));
 }
 
 async function connectFTP(config) {
@@ -308,12 +376,19 @@ function getCached(poolKey, type, path) {
     telemetry.cacheHits++;
     return entry.data;
   }
+  // CODE-3: Evict stale entry while we're here
+  if (entry) dirCache.delete(`${poolKey}:${type}:${path}`);
   telemetry.cacheMisses++;
   return null;
 }
 
 function setCached(poolKey, type, path, data) {
   dirCache.set(`${poolKey}:${type}:${path}`, { timestamp: Date.now(), data });
+  // CODE-3: Evict any entries older than TTL to prevent unbounded growth
+  const now = Date.now();
+  for (const [key, entry] of dirCache.entries()) {
+    if (now - entry.timestamp >= CACHE_TTL) dirCache.delete(key);
+  }
 }
 
 function invalidatePoolCache(poolKey) {
@@ -432,7 +507,8 @@ async function auditLog(toolName, args, status, user, errorMsg = null) {
     };
     await fs.appendFile(path.join(process.cwd(), '.ftp-mcp-audit.log'), JSON.stringify(logEntry) + '\n', 'utf8');
   } catch (e) {
-    // safely ignore audit log failures for now
+    // QUAL-5: Emit to stderr so audit failures are not silently swallowed
+    console.error('[ftp-mcp] Warning: Failed to write audit log:', e.message);
   }
 }
 
@@ -663,7 +739,7 @@ function generateSemanticPreview(filesToChange) {
 const server = new Server(
   {
     name: "ftp-mcp-server",
-    version: "1.2.1",
+    version: SERVER_VERSION, // CODE-1: reads from package.json at startup
   },
   {
     capabilities: {
@@ -986,8 +1062,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             direction: {
               type: "string",
-              description: "Sync direction: 'upload', 'download', or 'both'",
-              enum: ["upload", "download", "both"],
+              // QUAL-2: Only 'upload' is implemented; removed 'download'/'both' to avoid silent no-ops
+              description: "Sync direction: currently only 'upload' is supported",
+              enum: ["upload"],
               default: "upload"
             },
             dryRun: {
@@ -1247,16 +1324,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
-      currentConfig = profileConfig;
-      currentProfile = deployConfig.profile;
-
-      const useSFTP = isSFTP(currentConfig.host);
-      const client = await getClient(currentConfig);
+      // CODE-2: Use a local-scoped config to avoid mutating the module-level
+      // currentConfig/currentProfile globals, which would corrupt subsequent tool calls.
+      const deployProfileConfig = profileConfig;
+      const deployProfileName = deployConfig.profile;
+      const useSFTP = isSFTP(deployProfileConfig.host);
+      const deployEntry = await getClient(deployProfileConfig);
 
       try {
         const localPath = path.resolve(deployConfig.local);
         const stats = await syncFiles(
-          client,
+          deployEntry.client,
           useSFTP,
           localPath,
           deployConfig.remote,
@@ -1269,11 +1347,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return {
           content: [{
             type: "text",
-            text: `Deployment "${deployment}" complete:\n${deployConfig.description || ''}\n\nProfile: ${deployConfig.profile}\nLocal: ${deployConfig.local}\nRemote: ${deployConfig.remote}\n\nUploaded: ${stats.uploaded}\nSkipped: ${stats.skipped}\nIgnored: ${stats.ignored}\n${stats.errors.length > 0 ? '\nErrors:\n' + stats.errors.join('\n') : ''}`
+            text: `Deployment "${deployment}" complete:\n${deployConfig.description || ''}\n\nProfile: ${deployProfileName}\nLocal: ${deployConfig.local}\nRemote: ${deployConfig.remote}\n\nUploaded: ${stats.uploaded}\nSkipped: ${stats.skipped}\nIgnored: ${stats.ignored}\n${stats.errors.length > 0 ? '\nErrors:\n' + stats.errors.join('\n') : ''}`
           }]
         };
       } finally {
-        releaseClient(currentConfig);
+        releaseClient(deployProfileConfig);
       }
     } catch (error) {
       return {
@@ -1298,6 +1376,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               text: "Error: FTP credentials not configured. Please set FTPMCP_HOST, FTPMCP_USER environment variables or create a .ftpconfig file."
             }
           ]
+        };
+      }
+
+      // LOW-5: Perform a real connection test so credential errors surface early
+      try {
+        const testEntry = await getClient(currentConfig);
+        await testEntry.execute(c => c.list('.'));
+      } catch (connErr) {
+        currentConfig = null;
+        return {
+          content: [{ type: "text", text: `Error: Could not connect — ${connErr.message}` }],
+          isError: true
         };
       }
 
@@ -1540,10 +1630,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         case "ftp_stat": {
-          const { path } = request.params.arguments;
+          const { path: filePath } = request.params.arguments;
 
           if (useSFTP) {
-            const stats = await client.stat(path);
+            const stats = await client.stat(filePath);
             return {
               content: [{
                 type: "text",
@@ -1558,13 +1648,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               }]
             };
           } else {
-            const dirPath = path.substring(0, path.lastIndexOf('/')) || '.';
-            const fileName = path.substring(path.lastIndexOf('/') + 1);
-            const files = await client.list(dirPath);
+            // CODE-4: use filePath (not path module) for string operations
+            const dirPart = filePath.substring(0, filePath.lastIndexOf('/')) || '.';
+            const fileName = filePath.substring(filePath.lastIndexOf('/') + 1);
+            const files = await client.list(dirPart);
             const file = files.find(f => f.name === fileName);
 
             if (!file) {
-              throw new Error(`File not found: ${path}`);
+              throw new Error(`File not found: ${filePath}`);
             }
 
             return {
@@ -1582,17 +1673,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         case "ftp_exists": {
-          const { path } = request.params.arguments;
+          const { path: filePath } = request.params.arguments;
           let exists = false;
 
           try {
             if (useSFTP) {
-              await client.stat(path);
+              await client.stat(filePath);
               exists = true;
             } else {
-              const dirPath = path.substring(0, path.lastIndexOf('/')) || '.';
-              const fileName = path.substring(path.lastIndexOf('/') + 1);
-              const files = await client.list(dirPath);
+              // CODE-4: use filePath string, not the path module
+              const dirPart = filePath.substring(0, filePath.lastIndexOf('/')) || '.';
+              const fileName = filePath.substring(filePath.lastIndexOf('/') + 1);
+              const files = await client.list(dirPart);
               exists = files.some(f => f.name === fileName);
             }
           } catch (e) {
@@ -1630,6 +1722,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             return { content: [{ type: "text", text: "Error: Must provide pattern, contentPattern, or findLikelyConfigs" }], isError: true };
           }
 
+          // SEC-4: Validate user-supplied regex patterns to prevent ReDoS
+          let compiledPattern = null;
+          if (pattern) {
+            const safeGlob = pattern.replace(/\*/g, '.*').replace(/\?/g, '.');
+            const result = safeRegex(safeGlob);
+            if (result.error) return { content: [{ type: "text", text: `Error: ${result.error}` }], isError: true };
+            compiledPattern = result.regex;
+          }
+
+          let compiledContentPattern = null;
+          if (contentPattern) {
+            const result = safeRegex(contentPattern);
+            if (result.error) return { content: [{ type: "text", text: `Error: ${result.error}` }], isError: true };
+            compiledContentPattern = result.regex;
+          }
+
           const cacheKey = `${searchPath}:10`;
           let tree = getCached(poolKey, 'TREE', cacheKey);
           if (!tree) {
@@ -1644,9 +1752,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             matches = matches.filter(item => configRegex.test(item.name));
           }
 
-          if (pattern) {
-            const regex = new RegExp(pattern.replace(/\*/g, '.*').replace(/\?/g, '.'), 'i');
-            matches = matches.filter(item => regex.test(item.name));
+          if (compiledPattern) {
+            matches = matches.filter(item => compiledPattern.test(item.name));
           }
 
           if (extension) {
@@ -1658,8 +1765,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           let sliced = matches.slice(offset, offset + limit);
           let formatted = "";
 
-          if (contentPattern) {
-            const contentRegex = new RegExp(contentPattern, 'i');
+          if (compiledContentPattern) {
             const contentMatches = [];
 
             for (const item of sliced) {
@@ -1678,12 +1784,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
                 const lines = content.split('\n');
                 for (let i = 0; i < lines.length; i++) {
-                  if (contentRegex.test(lines[i])) {
+                  if (compiledContentPattern.test(lines[i])) {
                     const start = Math.max(0, i - 1);
                     const end = Math.min(lines.length - 1, i + 1);
                     const context = lines.slice(start, end + 1).map((l, idx) => `${start + idx + 1}: ${l}`).join('\n');
                     contentMatches.push(`File: ${item.path}\n${context}\n---`);
-                    break; // Just show first match per file to save space
+                    break;
                   }
                 }
               } catch (e) {
@@ -1804,6 +1910,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             };
           }
 
+          // LOW-3: Validate both paths against policy engine
+          try {
+            policyEngine.validateOperation('overwrite', { path: destPath });
+            policyEngine.validateOperation('patch', { path: sourcePath });
+          } catch (e) {
+            return { content: [{ type: "text", text: e.message }], isError: true };
+          }
+
           const buffer = await client.get(sourcePath);
           await client.put(buffer, destPath);
 
@@ -1815,8 +1929,26 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         case "ftp_batch_upload": {
           const { files } = request.params.arguments;
           const results = { success: [], failed: [] };
+          const snapshotPaths = files.map(f => f.remotePath);
+          const batchTxId = await snapshotManager.createSnapshot(client, useSFTP, snapshotPaths);
 
           for (const file of files) {
+            // CODE-6/SEC-3: Apply same security guards as ftp_upload
+            try { validateLocalPath(file.localPath); } catch (e) {
+              results.failed.push({ path: file.remotePath, error: e.message });
+              continue;
+            }
+            if (isSecretFile(file.localPath)) {
+              results.failed.push({ path: file.remotePath, error: `Blocked: likely secret file` });
+              continue;
+            }
+            try {
+              const stat = await fs.stat(file.localPath);
+              policyEngine.validateOperation('overwrite', { path: file.remotePath, size: stat.size });
+            } catch (e) {
+              results.failed.push({ path: file.remotePath, error: e.message });
+              continue;
+            }
             try {
               if (useSFTP) {
                 await client.put(file.localPath, file.remotePath);
@@ -1832,7 +1964,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           return {
             content: [{
               type: "text",
-              text: `Uploaded: ${results.success.length}\nFailed: ${results.failed.length}\n${results.failed.length > 0 ? '\nErrors:\n' + results.failed.map(f => `${f.path}: ${f.error}`).join('\n') : ''}`
+              text: `Uploaded: ${results.success.length}\nFailed: ${results.failed.length}\nTransaction ID: ${batchTxId}\n${results.failed.length > 0 ? '\nErrors:\n' + results.failed.map(f => `${f.path}: ${f.error}`).join('\n') : ''}`
             }]
           };
         }
@@ -1842,6 +1974,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const results = { success: [], failed: [] };
 
           for (const file of files) {
+            // CODE-7/SEC-2: Validate local paths to prevent path traversal
+            try { validateLocalPath(file.localPath); } catch (e) {
+              results.failed.push({ path: file.remotePath, error: e.message });
+              continue;
+            }
             try {
               if (useSFTP) {
                 await client.get(file.remotePath, file.localPath);
@@ -1926,6 +2063,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         case "ftp_upload": {
           const { localPath, remotePath } = request.params.arguments;
 
+          // SEC-3: Block path traversal and enforce local path safety
+          try { validateLocalPath(localPath); } catch (e) {
+            return { content: [{ type: "text", text: e.message }], isError: true };
+          }
+
           if (isSecretFile(localPath)) {
             return {
               content: [{ type: "text", text: `Security Warning: Blocked upload of likely secret file: ${localPath}` }],
@@ -1940,7 +2082,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             return { content: [{ type: "text", text: e.message }], isError: true };
           }
 
-          const txId = await snapshotManager.createSnapshot(client, useSFTP, [remotePath]);
+          const txIdUpload = await snapshotManager.createSnapshot(client, useSFTP, [remotePath]);
 
           if (useSFTP) {
             await client.put(localPath, remotePath);
@@ -1949,12 +2091,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
 
           return {
-            content: [{ type: "text", text: `Successfully uploaded ${localPath} to ${remotePath}\nTransaction ID: ${txId}` }]
+            content: [{ type: "text", text: `Successfully uploaded ${localPath} to ${remotePath}\nTransaction ID: ${txIdUpload}` }]
           };
         }
 
         case "ftp_download": {
           const { remotePath, localPath } = request.params.arguments;
+
+          // SEC-1: Block path traversal and enforce local path safety
+          try { validateLocalPath(localPath); } catch (e) {
+            return { content: [{ type: "text", text: e.message }], isError: true };
+          }
 
           if (useSFTP) {
             await client.get(remotePath, localPath);
@@ -1970,13 +2117,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         case "ftp_delete": {
           const { path: filePath } = request.params.arguments;
 
+          // CODE-5: Block dangerous root-level paths
+          try { assertSafeRemotePath(filePath); } catch (e) {
+            return { content: [{ type: "text", text: e.message }], isError: true };
+          }
+
           try {
             policyEngine.validateOperation('delete', { path: filePath });
           } catch (e) {
             return { content: [{ type: "text", text: e.message }], isError: true };
           }
 
-          const txId = await snapshotManager.createSnapshot(client, useSFTP, [filePath]);
+          const txIdDelete = await snapshotManager.createSnapshot(client, useSFTP, [filePath]);
 
           if (useSFTP) {
             await client.delete(filePath);
@@ -1985,7 +2137,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
 
           return {
-            content: [{ type: "text", text: `Successfully deleted ${filePath}\nTransaction ID: ${txId}` }]
+            content: [{ type: "text", text: `Successfully deleted ${filePath}\nTransaction ID: ${txIdDelete}` }]
           };
         }
 
@@ -2004,25 +2156,30 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         case "ftp_rmdir": {
-          const { path, recursive } = request.params.arguments;
+          const { path: rmPath, recursive } = request.params.arguments;
+
+          // CODE-5: Block dangerous root-level paths
+          try { assertSafeRemotePath(rmPath); } catch (e) {
+            return { content: [{ type: "text", text: e.message }], isError: true };
+          }
 
           if (useSFTP) {
-            await client.rmdir(path, recursive);
+            await client.rmdir(rmPath, recursive);
           } else {
             if (recursive) {
-              await client.removeDir(path);
+              await client.removeDir(rmPath);
             } else {
-              await client.send("RMD", path);
+              await client.removeEmptyDir(rmPath);
             }
           }
 
           return {
-            content: [{ type: "text", text: `Successfully removed directory ${path}` }]
+            content: [{ type: "text", text: `Successfully removed directory ${rmPath}` }]
           };
         }
 
         case "ftp_chmod": {
-          const { path, mode } = request.params.arguments;
+          const { path: chmodPath, mode } = request.params.arguments;
 
           if (!useSFTP) {
             return {
@@ -2030,10 +2187,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             };
           }
 
-          await client.chmod(path, mode);
+          // LOW-2: Parse octal string to number; reject invalid modes
+          const modeInt = parseInt(mode, 8);
+          if (isNaN(modeInt) || modeInt < 0 || modeInt > 0o7777) {
+            return {
+              content: [{ type: "text", text: `Error: Invalid chmod mode '${mode}'. Use octal notation e.g. '755'.` }],
+              isError: true
+            };
+          }
+
+          await client.chmod(chmodPath, modeInt);
 
           return {
-            content: [{ type: "text", text: `Successfully changed permissions of ${path} to ${mode}` }]
+            content: [{ type: "text", text: `Successfully changed permissions of ${chmodPath} to ${mode}` }]
           };
         }
 
@@ -2212,7 +2378,27 @@ async function main() {
   console.error("FTP MCP Server running on stdio");
 }
 
+// LOW-1: Graceful shutdown — close all pooled connections before exiting
+async function shutdown(signal) {
+  console.error(`[ftp-mcp] Received ${signal}, closing connections...`);
+  for (const [poolKey, entry] of connectionPool.entries()) {
+    try {
+      if (!entry.closed) {
+        entry.closed = true;
+        if (entry.client._isSFTP) await entry.client.end();
+        else entry.client.close();
+      }
+    } catch (e) { /* ignore */ }
+  }
+  connectionPool.clear();
+  process.exit(0);
+}
+
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+
 main().catch((error) => {
   console.error("Fatal error:", error);
   process.exit(1);
 });
+

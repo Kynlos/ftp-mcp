@@ -25,6 +25,7 @@ test_output.log
 # Project Documentation
 IMPROVEMENTS.md
 TECHNICAL_DEBT.md
+SECURITY_AUDIT.md
 *.tmp
 *.txt
 
