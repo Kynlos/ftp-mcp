@@ -2,6 +2,25 @@
 
 An enterprise-grade Model Context Protocol (MCP) server providing sophisticated FTP and SFTP operations optimized specifically for AI coding assistants. Features smart synchronization, connection pooling, directory caching, unified diff patching, and comprehensive security controls.
 
+## Why this exists
+
+Your AI can:
+- spin up a VPS
+- install a web server
+- build your entire app
+
+…and then gets stuck trying to upload files.
+
+So it writes a Python script.  
+Then forgets it exists.  
+Then writes it again next session.
+
+This fixes that.
+
+One connection. One call. Done.
+
+Built for AI to install. Designed for AI to use.
+
 ## Features
 
 - **Connection Pooling & Caching**: Sustains underlying connections across tool calls and leverages strict memory caching with smart aggressive invalidation for extreme sub-15ms performance.
