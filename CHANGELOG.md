@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.5.0] - 2026-04-09
+
+### Added
+- **Native MCP Prompts**: Structured prompts like `audit-project` and `deploy-checklist` for guided agentic workflows.
+- **Resource Templates**: Dynamic access to remote files via `mcp://remote-file/{path}`, allowing agents to "read" files natively as MCP resources.
+- **Operational Transparency**: Real-time server logging for connection pooling events and detailed progress tracking (0-100%) for bulk operations like `ftp_sync`, `ftp_batch_upload`, and `ftp_batch_download`.
+
+### Security
+- **Resource Guarding**: Integrated `PolicyEngine` and path-traversal protection into resource template resolution.
+
+### Fixed
+- **Connection Reliability**: Resolved a resource leak in the resource handler and optimized connection pool performance under high-concurrency scenarios.
+
 ## [1.4.0] - 2026-04-09
 
 ### Added

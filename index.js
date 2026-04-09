@@ -7,6 +7,9 @@ import {
   ListToolsRequestSchema,
   ListResourcesRequestSchema,
   ReadResourceRequestSchema,
+  ListResourceTemplatesRequestSchema,
+  ListPromptsRequestSchema,
+  GetPromptRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { Client as FTPClient } from "basic-ftp";
 import SFTPClient from "ssh2-sftp-client";
@@ -61,7 +64,7 @@ function getAISuggestion(type, context = {}) {
 }
 
 // Read version from package.json to avoid version drift (CODE-1)
-let SERVER_VERSION = "1.4.0";
+let SERVER_VERSION = "1.5.0";
 try {
   const pkg = JSON.parse(readFileSync(path.join(__dirname, 'package.json'), 'utf8'));
   SERVER_VERSION = pkg.version || SERVER_VERSION;
@@ -494,6 +497,10 @@ async function getClient(config) {
 
   if (existing && !existing.closed) {
     if (existing.idleTimeout) clearTimeout(existing.idleTimeout);
+    server.sendLoggingMessage({
+      level: "debug",
+      data: { message: `Reusing cached connection for ${poolKey}` }
+    });
     return existing;
   }
 
@@ -537,6 +544,10 @@ async function getClient(config) {
       }
 
       connectionPool.set(poolKey, entry);
+      server.sendLoggingMessage({
+        level: "info",
+        data: { message: `Successfully connected to ${poolKey} (${useSFTP ? 'SFTP' : 'FTP'})` }
+      });
       return entry;
     } finally {
       connectingPromises.delete(poolKey);
@@ -639,7 +650,7 @@ async function getTreeRecursive(client, useSFTP, remotePath, depth = 0, maxDepth
   return results;
 }
 
-async function syncFiles(client, useSFTP, localPath, remotePath, direction, ignorePatterns = null, basePath = null, extraExclude = [], dryRun = false, useManifest = true, _isTopLevel = false) {
+async function syncFiles(client, useSFTP, localPath, remotePath, direction, ignorePatterns = null, basePath = null, extraExclude = [], dryRun = false, useManifest = true, _isTopLevel = false, progressState = null) {
   const stats = { uploaded: 0, downloaded: 0, skipped: 0, errors: [], ignored: 0, filesToChange: [] };
 
   if (ignorePatterns === null) {
@@ -647,6 +658,19 @@ async function syncFiles(client, useSFTP, localPath, remotePath, direction, igno
     basePath = localPath;
     _isTopLevel = true;
     if (useManifest) await syncManifestManager.load();
+    
+    // Initialize progress tracking if a token is provided
+    if (progressState && progressState.token) {
+      server.notification({
+        method: "notifications/progress",
+        params: {
+          progressToken: progressState.token,
+          progress: 0,
+          total: progressState.total || 100,
+          message: "Starting synchronization..."
+        }
+      });
+    }
   }
 
   if (extraExclude.length > 0) {
@@ -660,11 +684,8 @@ async function syncFiles(client, useSFTP, localPath, remotePath, direction, igno
       const localFilePath = path.join(localPath, file.name);
       const remoteFilePath = `${remotePath}/${file.name}`;
 
-      // In some environments (like Windows with ftp-srv), rapid transfers cause ECONNRESET.
-      // A short delay helps stabilize the socket state during sequence (FTP only).
       if (!useSFTP) await new Promise(r => setTimeout(r, 50));
 
-      // Security check first so we can warn even if it's in .gitignore/.ftpignore
       if (isSecretFile(localFilePath)) {
         if (dryRun) stats.filesToChange.push(localFilePath);
         stats.errors.push(`Security Warning: Blocked upload of likely secret file: ${localFilePath}`);
@@ -685,18 +706,16 @@ async function syncFiles(client, useSFTP, localPath, remotePath, direction, igno
               await client.ensureDir(remoteFilePath);
             }
           }
-          const subStats = await syncFiles(client, useSFTP, localFilePath, remoteFilePath, direction, ignorePatterns, basePath, extraExclude, dryRun);
+          const subStats = await syncFiles(client, useSFTP, localFilePath, remoteFilePath, direction, ignorePatterns, basePath, extraExclude, dryRun, useManifest, false, progressState);
           stats.uploaded += subStats.uploaded;
           stats.downloaded += subStats.downloaded;
           stats.skipped += subStats.skipped;
           stats.ignored += subStats.ignored;
           stats.errors.push(...subStats.errors);
         } else {
-          // isSecretFile already checked above in the loop
           const localStat = await fs.stat(localFilePath);
           let shouldUpload = true;
 
-          // 1. Fast check using local manifest
           if (useManifest) {
             const changedLocally = await syncManifestManager.isFileChanged(localFilePath, remoteFilePath, localStat);
             if (!changedLocally) {
@@ -705,7 +724,6 @@ async function syncFiles(client, useSFTP, localPath, remotePath, direction, igno
             }
           }
 
-          // 2. Slow check using remote stat
           if (shouldUpload) {
             try {
               const remoteStat = useSFTP
@@ -727,6 +745,20 @@ async function syncFiles(client, useSFTP, localPath, remotePath, direction, igno
 
           if (shouldUpload) {
             if (!dryRun) {
+              // Update progress before transfer
+              if (progressState && progressState.token) {
+                progressState.current++;
+                server.notification({
+                  method: "notifications/progress",
+                  params: {
+                    progressToken: progressState.token,
+                    progress: progressState.current,
+                    total: progressState.total,
+                    message: `Transferring ${file.name}...`
+                  }
+                });
+              }
+
               let attempts = 0;
               const maxAttempts = 3;
               let success = false;
@@ -744,7 +776,7 @@ async function syncFiles(client, useSFTP, localPath, remotePath, direction, igno
                   attempts++;
                   lastError = err;
                   if (attempts < maxAttempts) {
-                    await new Promise(r => setTimeout(r, 100 * attempts)); // Backoff
+                    await new Promise(r => setTimeout(r, 100 * attempts));
                   }
                 }
               }
@@ -827,7 +859,9 @@ const server = new Server(
   {
     capabilities: {
       tools: {},
-      resources: {},
+      resources: { subscribe: true, templates: true },
+      prompts: {},
+      logging: {}
     },
   }
 );
@@ -1387,7 +1421,161 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
       ]
     };
   }
+
+  // Handle mcp://remote-file/{path} template
+  if (request.params.uri.startsWith("mcp://remote-file/")) {
+    const filePath = request.params.uri.replace("mcp://remote-file/", "");
+    if (!currentConfig) throw new Error("No active connection. Use ftp_connect first.");
+
+    // SECURITY: Block path traversal in URI template
+    if (filePath.includes('..')) {
+      throw new Error(`Invalid path: Path traversal attempted in resource URI: ${filePath}`);
+    }
+
+    // SECURITY: Validate against policy engine
+    try {
+      const policyEngine = new PolicyEngine(currentConfig || {});
+      policyEngine.validateOperation('read', { path: filePath });
+    } catch (e) {
+      throw new Error(`Policy Violation: ${e.message}`);
+    }
+    
+    try {
+      const entry = await getClient(currentConfig);
+      const content = await entry.execute(async (client) => {
+        if (client._isSFTP) {
+          const buffer = await client.get(filePath);
+          return buffer.toString('utf8');
+        } else {
+          const chunks = [];
+          const stream = new Writable({ write(c, e, cb) { chunks.push(c); cb(); } });
+          await client.downloadTo(stream, filePath);
+          return Buffer.concat(chunks).toString('utf8');
+        }
+      });
+
+      return {
+        contents: [{
+          uri: request.params.uri,
+          mimeType: "text/plain",
+          text: content
+        }]
+      };
+    } finally {
+      if (currentConfig) releaseClient(currentConfig);
+    }
+  }
+
   throw new Error(`Resource not found: ${request.params.uri}`);
+});
+
+server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => {
+  return {
+    resourceTemplates: [
+      {
+        uriTemplate: "mcp://remote-file/{path}",
+        name: "Remote File Content",
+        description: "Read the full UTF-8 content of any remote file as an MCP resource."
+      }
+    ]
+  };
+});
+
+async function countFilesRecursive(localPath, ignorePatterns = null, basePath = null) {
+  if (ignorePatterns === null) {
+    ignorePatterns = await loadIgnorePatterns(localPath);
+    basePath = localPath;
+  }
+
+  let count = 0;
+  const files = await fs.readdir(localPath, { withFileTypes: true });
+
+  for (const file of files) {
+    const fullPath = path.join(localPath, file.name);
+    if (shouldIgnore(fullPath, ignorePatterns, basePath) || isSecretFile(fullPath)) continue;
+
+    if (file.isDirectory()) {
+      count += await countFilesRecursive(fullPath, ignorePatterns, basePath);
+    } else {
+      count++;
+    }
+  }
+  return count;
+}
+
+server.setRequestHandler(ListPromptsRequestSchema, async () => {
+  return {
+    prompts: [
+      {
+        name: "audit-project",
+        description: "Perform a security and architectural review of the remote workspace.",
+        arguments: [
+          {
+            name: "path",
+            description: "Path to audit (defaults to root)",
+            required: false
+          }
+        ]
+      },
+      {
+        name: "deploy-checklist",
+        description: "Guide the agent through a pre-deployment safety check.",
+        arguments: [
+          {
+            name: "deployment",
+            description: "Target deployment name from .ftpconfig",
+            required: true
+          }
+        ]
+      }
+    ]
+  };
+});
+
+server.setRequestHandler(GetPromptRequestSchema, async (request) => {
+  if (request.params.name === "audit-project") {
+    const path = request.params.arguments?.path || ".";
+    return {
+      description: "Project Security & Architecture Audit",
+      messages: [
+        {
+          role: "user",
+          content: {
+            type: "text",
+            text: `Please audit the remote workspace at \`${path}\`. 
+Follow these steps:
+1. Run \`ftp_analyze_workspace "${path}"\` to detect framework patterns.
+2. List sensitive directories to ensure no secrets are exposed.
+3. Search for configuration files (e.g., \`.env\`, \`config.js\`) using \`ftp_search\`.
+4. Review the primary dependency manifest (e.g., \`package.json\`) for security risks.
+Summarize your findings with a focus on potential vulnerabilities and architectural improvements.`
+          }
+        }
+      ]
+    };
+  }
+
+  if (request.params.name === "deploy-checklist") {
+    const deployment = request.params.arguments?.deployment;
+    return {
+      description: "Pre-Deployment Safety Check",
+      messages: [
+        {
+          role: "user",
+          content: {
+            type: "text",
+            text: `Perform a safety check before deploying to \`${deployment}\`.
+1. Verify the deployment exists with \`ftp_list_deployments\`.
+2. Check remote disk space with \`ftp_disk_space\` (if SFTP).
+3. List the target remote directory to ensure no critical files are being overwritten without a backup.
+4. Run \`ftp_sync\` with \`dryRun: true\` to preview the changes.
+Report if it is safe to proceed with the actual deployment.`
+          }
+        }
+      ]
+    };
+  }
+  throw new Error(`Prompt not found: ${request.params.name}`);
 });
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -2079,6 +2267,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const snapshotPaths = files.map(f => f.remotePath);
           const batchTxId = await snapshotManager.createSnapshot(client, useSFTP, snapshotPaths);
 
+          const progressToken = request.params._meta?.progressToken;
+          if (progressToken) {
+            server.notification({
+              method: "notifications/progress",
+              params: {
+                progressToken,
+                progress: 0,
+                total: files.length,
+                message: "Starting batch upload..."
+              }
+            });
+          }
+
+          let current = 0;
+
           for (const file of files) {
             // CODE-6/SEC-3: Apply same security guards as ftp_upload
             try { validateLocalPath(file.localPath); } catch (e) {
@@ -2103,6 +2306,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 await client.uploadFrom(file.localPath, file.remotePath);
               }
               results.success.push(file.remotePath);
+
+              if (progressToken) {
+                current++;
+                server.notification({
+                  method: "notifications/progress",
+                  params: {
+                    progressToken,
+                    progress: current,
+                    total: files.length,
+                    message: `Uploaded ${path.basename(file.remotePath)}`
+                  }
+                });
+              }
             } catch (error) {
               results.failed.push({ path: file.remotePath, error: error.message });
             }
@@ -2120,6 +2336,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const { files } = request.params.arguments;
           const results = { success: [], failed: [] };
 
+          const progressToken = request.params._meta?.progressToken;
+          if (progressToken) {
+            server.notification({
+              method: "notifications/progress",
+              params: {
+                progressToken,
+                progress: 0,
+                total: files.length,
+                message: "Starting batch download..."
+              }
+            });
+          }
+
+          let current = 0;
+
           for (const file of files) {
             // CODE-7/SEC-2: Validate local paths to prevent path traversal
             try { validateLocalPath(file.localPath); } catch (e) {
@@ -2133,6 +2364,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 await client.downloadTo(file.localPath, file.remotePath);
               }
               results.success.push(file.remotePath);
+
+              if (progressToken) {
+                current++;
+                server.notification({
+                  method: "notifications/progress",
+                  params: {
+                    progressToken,
+                    progress: current,
+                    total: files.length,
+                    message: `Downloaded ${path.basename(file.remotePath)}`
+                  }
+                });
+              }
             } catch (error) {
               results.failed.push({ path: file.remotePath, error: error.message });
             }
@@ -2149,7 +2393,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         case "ftp_sync": {
           const { localPath, remotePath, direction = "upload", dryRun = false, useManifest = true } = request.params.arguments;
           const startTime = Date.now();
-          const stats = await syncFiles(client, useSFTP, localPath, remotePath, direction, null, null, [], dryRun, useManifest);
+
+          const progressToken = request.params._meta?.progressToken;
+          let progressState = null;
+
+          if (progressToken && !dryRun) {
+            const total = await countFilesRecursive(localPath);
+            progressState = { token: progressToken, current: 0, total };
+          }
+
+          const stats = await syncFiles(client, useSFTP, localPath, remotePath, direction, null, null, [], dryRun, useManifest, true, progressState);
           const duration = Date.now() - startTime;
 
           if (!dryRun) {
