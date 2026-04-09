@@ -800,17 +800,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     tools: [
       {
         name: "ftp_connect",
-        description: "Connect to a named FTP profile from .ftpconfig",
+        description: "Establish or switch the active connection to a specific remote server profile defined in your .ftpconfig (e.g., 'production', 'staging'). This is the first step before performing any remote operations.",
         inputSchema: {
           type: "object",
           properties: {
             profile: {
               type: "string",
-              description: "Profile name from .ftpconfig (e.g., 'production', 'staging')"
+              description: "The named profile key from your .ftpconfig file."
             },
             useEnv: {
               type: "boolean",
-              description: "Force use of environment variables instead of .ftpconfig",
+              description: "If true, bypasses .ftpconfig and connects using global environment variables (FTPMCP_HOST, etc.)",
               default: false
             }
           }
@@ -818,13 +818,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "ftp_deploy",
-        description: "Run a named deployment preset from .ftpconfig",
+        description: "Execute a pre-defined deployment preset from .ftpconfig. This typically maps a specific local folder to a remote target with pre-configured exclusion rules.",
         inputSchema: {
           type: "object",
           properties: {
             deployment: {
               type: "string",
-              description: "Deployment name from .ftpconfig deployments (e.g., 'deploy-frontend', 'deploy-api')"
+              description: "The name of the deployment preset (e.g., 'web-app', 'api-server')."
             }
           },
           required: ["deployment"]
@@ -840,23 +840,23 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "ftp_list",
-        description: "List files and directories in a remote FTP/SFTP path",
+        description: "List files and directories in a remote path. Use 'limit' and 'offset' for pagination when dealing with directories containing hundreds of files to avoid context overflow.",
         inputSchema: {
           type: "object",
           properties: {
             path: {
               type: "string",
-              description: "Remote path to list (defaults to current directory)",
+              description: "Remote directory path (defaults to current working directory).",
               default: "."
             },
             limit: {
               type: "number",
-              description: "Maximum number of files to return",
+              description: "Maximum results to return in this chunk.",
               default: 100
             },
             offset: {
               type: "number",
-              description: "Number of files to skip over",
+              description: "Starting position in the file list for pagination.",
               default: 0
             }
           }
@@ -864,21 +864,21 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "ftp_get_contents",
-        description: "Read file content directly from FTP/SFTP without downloading",
+        description: "Read the source text of a remote file. CRITICAL: For large files, use 'startLine' and 'endLine' to extract specific chunks and prevent hitting the LLM context limit.",
         inputSchema: {
           type: "object",
           properties: {
             path: {
               type: "string",
-              description: "Remote file path to read"
+              description: "Absolute or relative remote path to the file."
             },
             startLine: {
               type: "number",
-              description: "Optional start line for reading chunk (1-indexed)"
+              description: "Optional: The first line to include in the output (1-indexed)."
             },
             endLine: {
               type: "number",
-              description: "Optional end line for reading chunk (inclusive, 1-indexed)"
+              description: "Optional: The last line to include (inclusive, 1-indexed)."
             }
           },
           required: ["path"]
@@ -886,25 +886,25 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "ftp_patch_file",
-        description: "Apply a Unified Diff patch to a remote file",
+        description: "Apply a Unified Diff patch to a remote file. RECOMMENDED: Use this instead of ftp_put_contents for updating existing files to minimize bandwidth and ensure atomic-like updates. For new files, use ftp_put_contents.",
         inputSchema: {
           type: "object",
           properties: {
             path: {
               type: "string",
-              description: "Remote file path to patch"
+              description: "Remote path to the existing file to be patched."
             },
             patch: {
               type: "string",
-              description: "Unified diff string containing the changes"
+              description: "The Unified Diff formatted string containing your local changes."
             },
             expectedHash: {
               type: "string",
-              description: "Optional MD5 hash of the file before patching to prevent drift"
+              description: "Optional (but recommended): The SHA-256 hash of the remote file before patching to prevent race conditions (drift protection)."
             },
             createBackup: {
               type: "boolean",
-              description: "Create a .bak file before patching",
+              description: "Generate a .bak copy of the remote file before applying the changes.",
               default: true
             }
           },
@@ -913,13 +913,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "ftp_analyze_workspace",
-        description: "Semantically analyze a remote directory to detect project type and dependencies",
+        description: "Introspect the remote directory to identify technical environments (e.g., Node.js, PHP, Python) and read dependency manifests. Use this to gain architectural context of a new codebase.",
         inputSchema: {
           type: "object",
           properties: {
             path: {
               type: "string",
-              description: "Remote directory path to analyze (defaults to current)",
+              description: "Remote directory to analyze (defaults to current server root).",
               default: "."
             }
           }
@@ -927,17 +927,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "ftp_put_contents",
-        description: "Write content directly to FTP/SFTP file without local file",
+        description: "Write raw text directly to a remote destination. Best for creating NEW files. For modifying existing files, prefer ftp_patch_file.",
         inputSchema: {
           type: "object",
           properties: {
             path: {
               type: "string",
-              description: "Remote file path to write"
+              description: "Remote destination path."
             },
             content: {
               type: "string",
-              description: "Content to write to the file"
+              description: "The full string content to write."
             }
           },
           required: ["path", "content"]
@@ -945,13 +945,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "ftp_stat",
-        description: "Get file metadata (size, modified date, permissions)",
+        description: "Retrieve comprehensive metadata for a remote property, including size, modification timestamps, and UNIX permissions.",
         inputSchema: {
           type: "object",
           properties: {
             path: {
               type: "string",
-              description: "Remote file path"
+              description: "Remote file or directory path."
             }
           },
           required: ["path"]
@@ -959,13 +959,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "ftp_exists",
-        description: "Check if file or folder exists on FTP/SFTP server",
+        description: "Check for the existence of a file or folder without performing heavy file operations. Use this for conditional logic workflows.",
         inputSchema: {
           type: "object",
           properties: {
             path: {
               type: "string",
-              description: "Remote path to check"
+              description: "Remote target path."
             }
           },
           required: ["path"]
@@ -973,18 +973,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "ftp_tree",
-        description: "Get recursive directory listing (entire structure at once)",
+        description: "Generate a complete recursive directory map. Use this to visualize project structure, but be cautious with 'maxDepth' in very large remote repositories to avoid excessive network payload.",
         inputSchema: {
           type: "object",
           properties: {
             path: {
               type: "string",
-              description: "Remote path to start tree from",
+              description: "Remote directory path to start mapping from (defaults to root).",
               default: "."
             },
             maxDepth: {
               type: "number",
-              description: "Maximum depth to recurse",
+              description: "Maximum recursion depth to prevent infinite loops or huge payloads.",
               default: 10
             }
           }
@@ -992,40 +992,40 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "ftp_search",
-        description: "Advanced remote search: find files by name, content, or type",
+        description: "Advanced remote file search. Supports finding files by name (wildcards), extension, or content regex (grep-like). Use this to find specific code patterns across the remote workspace.",
         inputSchema: {
           type: "object",
           properties: {
             pattern: {
               type: "string",
-              description: "Filename search pattern (supports wildcards like *.js)"
+              description: "File name pattern (e.g. `*.js`, `db_*`)."
             },
             contentPattern: {
               type: "string",
-              description: "Regex pattern to search inside file contents (grep)"
+              description: "Regex pattern to search inside file contents. Highly efficient for finding variable usage or specific logic."
             },
             extension: {
               type: "string",
-              description: "Filter by file extension (e.g., '.js', '.php')"
+              description: "Restrict search to specific file extensions (e.g. `.css`)."
             },
             findLikelyConfigs: {
               type: "boolean",
-              description: "If true, prioritizes finding config, auth, and build files",
+              description: "Prioritize searching for project manifests and config files (package.json, .env, etc.)",
               default: false
             },
             path: {
               type: "string",
-              description: "Remote path to search in",
+              description: "Remote directory to start the recursive search in.",
               default: "."
             },
             limit: {
               type: "number",
-              description: "Maximum results to return",
+              description: "Maximum matches to return.",
               default: 50
             },
             offset: {
               type: "number",
-              description: "Results to skip over",
+              description: "Skip initial matches for pagination.",
               default: 0
             }
           }
@@ -1033,17 +1033,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "ftp_copy",
-        description: "Duplicate files on server (SFTP only)",
+        description: "Directly duplicate a file on the remote server without downloading and re-uploading. CRITICAL: Only supported on SFTP connections.",
         inputSchema: {
           type: "object",
           properties: {
             sourcePath: {
               type: "string",
-              description: "Source file path"
+              description: "Qualified remote source path."
             },
             destPath: {
               type: "string",
-              description: "Destination file path"
+              description: "Target remote destination path."
             }
           },
           required: ["sourcePath", "destPath"]
@@ -1051,18 +1051,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "ftp_batch_upload",
-        description: "Upload multiple files at once",
+        description: "Upload a collection of local files to remote destinations in a single operation. HIGHLY RECOMMENDED for multiple files to minimize connection handshaking overhead and drastically improve performance.",
         inputSchema: {
           type: "object",
           properties: {
             files: {
               type: "array",
-              description: "Array of {localPath, remotePath} objects",
+              description: "A list of objects, each defining a local source and a remote destination.",
               items: {
                 type: "object",
                 properties: {
-                  localPath: { type: "string" },
-                  remotePath: { type: "string" }
+                  localPath: { type: "string", description: "Source path on your local machine." },
+                  remotePath: { type: "string", description: "Target path on the remote server." }
                 },
                 required: ["localPath", "remotePath"]
               }
@@ -1073,18 +1073,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "ftp_batch_download",
-        description: "Download multiple files at once",
+        description: "Download a selection of remote files to local destinations. HIGHLY RECOMMENDED for bulk downloads to leverage stable socket persistence.",
         inputSchema: {
           type: "object",
           properties: {
             files: {
               type: "array",
-              description: "Array of {remotePath, localPath} objects",
+              description: "A list of objects mapping remote sources to local destinations.",
               items: {
                 type: "object",
                 properties: {
-                  remotePath: { type: "string" },
-                  localPath: { type: "string" }
+                  remotePath: { type: "string", description: "Source path on the remote server." },
+                  localPath: { type: "string", description: "Destination path on your local machine." }
                 },
                 required: ["remotePath", "localPath"]
               }
@@ -1095,33 +1095,32 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "ftp_sync",
-        description: "Smart sync local ↔ remote (only changed files)",
+        description: "Deploy entire project folders using smart synchronization. Analyzes local and remote directory trees and only transfers files that have changed in size or modification date. Automatically respects .gitignore and .ftpignore.",
         inputSchema: {
           type: "object",
           properties: {
             localPath: {
               type: "string",
-              description: "Local directory path"
+              description: "The source directory on your local machine."
             },
             remotePath: {
               type: "string",
-              description: "Remote directory path"
+              description: "The target destination directory on the remote server."
             },
             direction: {
               type: "string",
-              // QUAL-2: Only 'upload' is implemented; removed 'download'/'both' to avoid silent no-ops
-              description: "Sync direction: currently only 'upload' is supported",
+              description: "Sync direction. Currently only 'upload' is implemented for safety.",
               enum: ["upload"],
               default: "upload"
             },
             dryRun: {
               type: "boolean",
-              description: "If true, simulates the sync without transferring files",
+              description: "If true, logs exactly which files would be changed without performing any actual transfers.",
               default: false
             },
             useManifest: {
               type: "boolean",
-              description: "Use local manifest cache for faster deploys (drift-aware)",
+              description: "Enables the local manifest cache for extremely fast delta detection on subsequent syncs.",
               default: true
             }
           },
@@ -1130,13 +1129,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "ftp_disk_space",
-        description: "Check available space on server (SFTP only)",
+        description: "Query the remote server for available disk space. CRITICAL: Only available on SFTP connections.",
         inputSchema: {
           type: "object",
           properties: {
             path: {
               type: "string",
-              description: "Remote path to check",
+              description: "Remote filesystem path to check (defaults to server root).",
               default: "."
             }
           }
@@ -1144,17 +1143,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "ftp_upload",
-        description: "Upload a file to the FTP/SFTP server",
+        description: "Standard single-file transport to the remote server. For bulk transfers, favor ftp_batch_upload.",
         inputSchema: {
           type: "object",
           properties: {
             localPath: {
               type: "string",
-              description: "Local file path to upload"
+              description: "Source path on your local machine."
             },
             remotePath: {
               type: "string",
-              description: "Remote destination path"
+              description: "Target location on the remote server."
             }
           },
           required: ["localPath", "remotePath"]
@@ -1162,17 +1161,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "ftp_download",
-        description: "Download a file from the FTP/SFTP server",
+        description: "Standard single-file transport from the remote server. For bulk downloads, favor ftp_batch_download.",
         inputSchema: {
           type: "object",
           properties: {
             remotePath: {
               type: "string",
-              description: "Remote file path to download"
+              description: "Source file location on the remote server."
             },
             localPath: {
               type: "string",
-              description: "Local destination path"
+              description: "Destination location on your local machine."
             }
           },
           required: ["remotePath", "localPath"]
@@ -1180,13 +1179,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "ftp_delete",
-        description: "Delete a file from the FTP/SFTP server",
+        description: "Permanently remove a file from the remote server. Use with caution.",
         inputSchema: {
           type: "object",
           properties: {
             path: {
               type: "string",
-              description: "Remote file path to delete"
+              description: "The remote file path to be destroyed."
             }
           },
           required: ["path"]
@@ -1194,13 +1193,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "ftp_mkdir",
-        description: "Create a directory on the FTP/SFTP server",
+        description: "Create a new directory structure on the remote server. Supports nested creation (mkdir -p).",
         inputSchema: {
           type: "object",
           properties: {
             path: {
               type: "string",
-              description: "Remote directory path to create"
+              description: "The remote directory path to create."
             }
           },
           required: ["path"]
@@ -1208,17 +1207,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "ftp_rmdir",
-        description: "Remove a directory from the FTP/SFTP server",
+        description: "Delete a directory from the remote server.",
         inputSchema: {
           type: "object",
           properties: {
             path: {
               type: "string",
-              description: "Remote directory path to remove"
+              description: "The remote directory path to remove."
             },
             recursive: {
               type: "boolean",
-              description: "Remove directory recursively",
+              description: "If true, deletes all files and subdirectories within the target directory.",
               default: false
             }
           },
@@ -1227,17 +1226,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "ftp_chmod",
-        description: "Change file permissions on the FTP/SFTP server (SFTP only)",
+        description: "Change remote file permissions. CRITICAL: Only supported on SFTP connections.",
         inputSchema: {
           type: "object",
           properties: {
             path: {
               type: "string",
-              description: "Remote file path"
+              description: "Remote file path to modify."
             },
             mode: {
               type: "string",
-              description: "Permission mode in octal (e.g., '755', '644')"
+              description: "Standard octal permission string (e.g., '755' for executable, '644' for read-write)."
             }
           },
           required: ["path", "mode"]
@@ -1245,17 +1244,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "ftp_rename",
-        description: "Rename or move a file on the FTP/SFTP server",
+        description: "Move or rename files and directories on the remote server.",
         inputSchema: {
           type: "object",
           properties: {
             oldPath: {
               type: "string",
-              description: "Current file path"
+              description: "Current remote location."
             },
             newPath: {
               type: "string",
-              description: "New file path"
+              description: "New desired remote location."
             }
           },
           required: ["oldPath", "newPath"]
@@ -1263,13 +1262,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "ftp_rollback",
-        description: "Rollback a previous transaction using its snapshot",
+        description: "Undo a previous file mutation by restoring it from a system-generated snapshot. This provides safety during complex refactoring tasks.",
         inputSchema: {
           type: "object",
           properties: {
             transactionId: {
               type: "string",
-              description: "Transaction ID to rollback (e.g., tx_1234567890_abcd)"
+              description: "Specific ID associated with the snapshot (e.g., 'tx_12345'). Get this from ftp_list_transactions."
             }
           },
           required: ["transactionId"]
@@ -1277,7 +1276,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "ftp_list_transactions",
-        description: "List available rollback transactions",
+        description: "Expose all recent mutations currently stored in the system's SnapshotManager. Essential for planning rollbacks.",
         inputSchema: {
           type: "object",
           properties: {}
@@ -1285,13 +1284,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "ftp_probe_capabilities",
-        description: "Probe the server to detect supported features (chmod, symlinks, disk space, etc.)",
+        description: "Scan the remote server to determine supported filesystem features (e.g., chmod availability, symlink support, disk space querying). Helpful for troubleshooting capabilities.",
         inputSchema: {
           type: "object",
           properties: {
             testPath: {
               type: "string",
-              description: "A safe remote directory to run tests in (defaults to current directory)",
+              description: "A safe, ephemeral directory to run capability benchmarks in.",
               default: "."
             }
           }
@@ -1299,7 +1298,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "ftp_telemetry",
-        description: "Get connection health and performance telemetry",
+        description: "Retrieve internal performance metrics, including average latency, connection pool health, and total processed bytes.",
         inputSchema: {
           type: "object",
           properties: {}
