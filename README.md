@@ -104,6 +104,20 @@ Instead of requesting a 5,000-line remote file, making a 2-line edit locally, an
 ### Semantic Workspace Analysis
 Calling `ftp_analyze_workspace` will traverse the remote filesystem natively investigating configurations (`package.json`, `composer.json`). It will evaluate structure patterns and package dependencies, instantly reporting exact context of the remote language mapping (e.g. "Node.js Environment operating React mapping to Express").
 
+### Native MCP Prompts
+The server provides built-in prompts that guide AI agents through complex workflows:
+- **`audit-project`**: Instructs the agent on how to perform a deep security and architectural audit of a remote codebase.
+- **`deploy-checklist`**: Provides a standard safety checklist for agents to verify before performing production deployments or massive synchronizations.
+
+### Resource Templates (Remote File Access)
+Access remote files as standard MCP resources without explicitly calling a tool:
+- **URI Template**: `mcp://remote-file/{path}`
+- Supports direct UTF-8 reading and respects all `PolicyEngine` security boundaries and path-traversal guards.
+
+### Operational Transparency
+- **Real-time Logging**: Emits protocol-native logging notifications for internal events like connection pooling, cache reuse, and transfer lifecycle steps.
+- **Progress Tracking**: Long-running operations (`ftp_sync`, `ftp_batch_upload`, etc.) emit granular progress updates (0-100%) so the AI agent and user can monitor large transfers in real-time.
+
 ### Strict Safe-Mode Execution
 Set `"readOnly": true` in any `.ftpconfig` profile. AI interactions over `ftp_delete`, `ftp_patch_file`, `ftp_put_contents`, or `ftp_sync(direction: "upload")` will immediately halt with a standardized sandbox violation, keeping production environments entirely safe from hallucinated tool executions.
 
