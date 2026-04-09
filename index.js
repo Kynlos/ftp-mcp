@@ -64,7 +64,7 @@ function getAISuggestion(type, context = {}) {
 }
 
 // Read version from package.json to avoid version drift (CODE-1)
-let SERVER_VERSION = "1.5.0";
+let SERVER_VERSION = "1.5.1";
 try {
   const pkg = JSON.parse(readFileSync(path.join(__dirname, 'package.json'), 'utf8'));
   SERVER_VERSION = pkg.version || SERVER_VERSION;

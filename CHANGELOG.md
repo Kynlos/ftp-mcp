@@ -1,6 +1,6 @@
 # Changelog
 
-## [1.5.0] - 2026-04-09
+## [1.5.1] - 2026-04-09
 
 ### Added
 - **Native MCP Prompts**: Structured prompts like `audit-project` and `deploy-checklist` for guided agentic workflows.
