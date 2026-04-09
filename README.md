@@ -9,7 +9,8 @@ An enterprise-grade Model Context Protocol (MCP) server providing sophisticated 
 - **Security & Authorization**: Native support for SSH Key exchanges (both direct and Agent-forwarding), Pass-phrase authentication, and explicit `readOnly: true` config profiling to sandbox dangerous modifications.
 - **Smart Directory Syncing**: Deep hash-and-size sync algorithms for minimal network payload deployments, complete with `--dryRun` toggling that logs differences back to the LLM without modifying live directories.
 - **Git & Node Aware**: Automatically unpacks `.gitignore` and `.ftpignore` environments. Semantically evaluates `package.json` for smart context summarization.
-- **Interactive Initializer**: Simple scaffolding of configurations natively via the CLI.
+- **AI-Guided Initialization**: A dedicated "AI-First" configuration track (`--init`) that provides highly verbose instruction context during setup, ensuring AI assistants absorb server capabilities and operational constraints directly into their working memory.
+- **Interactive Initializer**: Simple scaffolding of configurations natively via the CLI for human users.
 - **Audit Logging**: Robust instrumentation generating structured `.ftp-mcp-audit.log` traces on all filesystem mutations.
 - **Comprehensive E2E Testing**: Guaranteed operational functionality validated continuously by Node-based MCP IO test orchestration.
 

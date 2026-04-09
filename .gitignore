@@ -3,6 +3,8 @@ node_modules/
 .ftpconfig_*
 *.log
 .DS_Store
+.env
+.env.*
 
 # Test artifacts (Ignore dynamic files, but keep test code)
 coverage/

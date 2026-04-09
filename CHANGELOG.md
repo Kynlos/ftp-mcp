@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.3.1] - 2026-04-09
+
+### Added
+- **AI-Guided Initialization Track**: New `--init` wizard option designed for AI agents, providing verbose instruction context and fresh "memory" of server capabilities.
+
+### Fixed
+- **Wizard Crash**: Resolved a `TypeError` in `@clack/prompts` validation where empty input could cause a crash.
+- **Port Validation**: Added numeric validation for custom port entry in the setup wizard.
+- **Cancellation Logic**: Fixed missing process exits when cancelling at certain setup steps.
+
 ## [1.3.0] - 2026-04-09
 
 ### Security

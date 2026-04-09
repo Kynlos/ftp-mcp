@@ -26,7 +26,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // Read version from package.json to avoid version drift (CODE-1)
-let SERVER_VERSION = "1.3.0";
+let SERVER_VERSION = "1.3.1";
 try {
   const pkg = JSON.parse(readFileSync(path.join(__dirname, 'package.json'), 'utf8'));
   SERVER_VERSION = pkg.version || SERVER_VERSION;
@@ -42,27 +42,50 @@ if (process.argv.includes("--init")) {
 
     intro('🚀 Welcome to FTP-MCP Initialization Wizard');
 
+    const setupType = await select({
+      message: 'Who is running this setup wizard?',
+      options: [
+        { value: 'ai', label: '1. AI Agent Install (Provides verbose context on how to use the server)', hint: 'Detailed instructions for LLMs' },
+        { value: 'human', label: '2. Human Install (Standard Setup)', hint: 'Concise standard setup for human users' }
+      ]
+    });
+    if (isCancel(setupType)) { outro('Setup cancelled.'); process.exit(0); }
+
+    const isAI = setupType === 'ai';
+
     const host = await text({
-      message: 'Enter your FTP/SFTP Host (e.g. sftp://ftp.example.com)',
+      message: isAI
+        ? '[AI INSTRUCTION] Provide the remote FTP/SFTP Host address. (e.g. sftp://ftp.example.com or ftp://1.2.3.4). Note: This tool brokers remote filesystem access as an MCP server.'
+        : 'Enter your FTP/SFTP Host (e.g. sftp://ftp.example.com)',
       placeholder: 'sftp://127.0.0.1',
-      validate: (val) => val.length === 0 ? "Host is required!" : undefined,
+      validate: (val) => (!val || val.length === 0) ? "Host is required!" : undefined,
     });
     if (isCancel(host)) { outro('Setup cancelled.'); process.exit(0); }
 
     const user = await text({
-      message: 'Enter your Username',
-      validate: (val) => val.length === 0 ? "User is required!" : undefined,
+      message: isAI
+        ? '[AI INSTRUCTION] Provide the remote server username. This credential will be used for all subsequent tool calls in this session.'
+        : 'Enter your Username',
+      validate: (val) => (!val || val.length === 0) ? "User is required!" : undefined,
     });
     if (isCancel(user)) { outro('Setup cancelled.'); process.exit(0); }
 
     const pass = await promptPassword({
-      message: 'Enter your Password (optional if using keys)',
+      message: isAI
+        ? '[AI INSTRUCTION] Provide the password for the connection. If you are using SSH key authentication for SFTP, you may leave this field empty.'
+        : 'Enter your Password (optional if using keys)',
     });
     if (isCancel(pass)) { outro('Setup cancelled.'); process.exit(0); }
 
     const port = await text({
-      message: 'Enter port (optional, defaults to 21 for FTP, 22 for SFTP)',
-      placeholder: '22'
+      message: isAI
+        ? '[AI INSTRUCTION] Provide the specific port for the connection. Default is 21 for FTP and 22 for SFTP. If the user has not specified a custom port, you should leave this blank.'
+        : 'Enter port (optional, defaults to 21 for FTP, 22 for SFTP)',
+      placeholder: '22',
+      validate: (val) => {
+        if (val && isNaN(parseInt(val, 10))) return "Port must be a number!";
+        return undefined;
+      }
     });
     if (isCancel(port)) { outro('Setup cancelled.'); process.exit(0); }
 
@@ -70,10 +93,17 @@ if (process.argv.includes("--init")) {
     let privateKey = '';
 
     if (isSFTP) {
-      const usesKey = await confirm({ message: 'Are you using an SSH Private Key instead of a password?' });
-      if (!isCancel(usesKey) && usesKey) {
+      const usesKey = await confirm({
+        message: isAI
+          ? '[AI INSTRUCTION] An SFTP protocol was detected. Is the user employing an SSH Private Key instead of a traditional password? (Recommended for production)'
+          : 'Are you using an SSH Private Key instead of a password?'
+      });
+      if (isCancel(usesKey)) { outro('Setup cancelled.'); process.exit(0); }
+      if (usesKey) {
         privateKey = await text({
-          message: 'Path to your private key (e.g. ~/.ssh/id_rsa)',
+          message: isAI
+            ? '[AI INSTRUCTION] Provide the absolute local filesystem path to the SSH private key (e.g. ~/.ssh/id_rsa). This path must be accessible from the environment where the MCP server is running.'
+            : 'Path to your private key (e.g. ~/.ssh/id_rsa)',
         });
         if (isCancel(privateKey)) { outro('Setup cancelled.'); process.exit(0); }
       }
@@ -92,9 +122,26 @@ if (process.argv.includes("--init")) {
 
     await fs.writeFile(CONFIG_FILE, JSON.stringify(config, null, 2), 'utf8');
 
-    note(`✅ Successfully generated config file at:\n${CONFIG_FILE}`, 'Success');
+    if (isAI) {
+      note(
+        "AI CONTEXT ESTABLISHED: The `.ftpconfig` file has been generated.\n" +
+        "You now have access to this MCP server's tools.\n\n" +
+        "Important capabilities:\n" +
+        "- Content-rich operations: `ftp_list`, `ftp_download`, `ftp_upload`.\n" +
+        "- Batched operations: `ftp_batch_upload`, `ftp_batch_download` (Highly recommended for speed).\n" +
+        "- Safe regex searches: `ftp_search`.\n" +
+        "- Transparent paths: All remote operations are relative to the server root.\n\n" +
+        "You may now proceed with the user's tasks.",
+        "Configuration Success"
+      );
+    } else {
+      note(`✅ Successfully generated config file at:\n${CONFIG_FILE}`, 'Success');
+    }
 
-    outro("You're ready to deploy with MCP! Ask your AI to 'list remote files'");
+    outro(isAI
+      ? "Deployment complete. You are now configured to manage the remote filesystem."
+      : "You're ready to deploy with MCP! Ask your AI to 'list remote files'"
+    );
   } catch (err) {
     console.error(`❌ Init failed: ${err.message}`);
   }
