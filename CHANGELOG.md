@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.4.0] - 2026-04-09
+
+### Added
+- **AI-First Semantic Markers**: Directory and file listings now include high-signal icons (📂, 📄) and attention markers (📦 for config, ⚙️ for manifests, 🔒 for secrets, 🕰️ for backups), optimized for AI scanning.
+- **Context-Aware AI Suggestions**: Main tool error handler and specific tools now provide proactive troubleshooting hints with backticked command examples (e.g., [AI: Path not found. Suggested fix: `ftp_list "."`]).
+- **Session-Aware Hinting**: Agents are now proactively guided on their first connection to perform a workspace analysis, reducing onboarding friction.
+- **New MCP Resource**: `mcp://instruction/server-state` — A dynamic resource that agents can pull on-demand to see internal server state, connection protocol, and security constraints without cluttering tool outputs.
+
+### Changed
+- **Token Optimization**: Tool outputs have been redesigned to balance high-signal clarity with token efficiency, ensuring agents have more relevant context space.
+
 ## [1.3.1] - 2026-04-09
 
 ### Added

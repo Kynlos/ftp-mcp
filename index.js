@@ -5,6 +5,8 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
+  ListResourcesRequestSchema,
+  ReadResourceRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { Client as FTPClient } from "basic-ftp";
 import SFTPClient from "ssh2-sftp-client";
@@ -25,8 +27,41 @@ import crypto from "crypto";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// AI-First Semantic Icons
+const ICON = {
+  DIR: "📂",
+  FILE: "📄",
+  PKG: "📦",
+  CONFIG: "⚙️",
+  SECRET: "🔒",
+  BACKUP: "🕰️",
+  HINT: "💡",
+  ERROR: "❌"
+};
+
+/**
+ * AI-First: Generate context-aware suggestions for troubleshooting and next steps.
+ * This helper ensures the LLM receives actionable, backticked commands.
+ */
+function getAISuggestion(type, context = {}) {
+  switch (type) {
+    case 'error_enoent':
+      return `[AI: Path not found. Suggested fix: Check your CWD with \`ftp_list "."\` or verify the path exists with \`ftp_exists "${context.path}"\`]`;
+    case 'error_permission':
+      return `[AI: Permission denied. Suggested fix: Verify user rights with \`ftp_stat "${context.path}"\` or check if the server supports \`ftp_chmod\`]`;
+    case 'hint_connected':
+      return `[HINT: Connection active. Suggested next step: Run \`ftp_analyze_workspace "."\` to understand the project architecture.]`;
+    case 'hint_list_config':
+      return `[HINT: Found project manifests. Suggested next step: Read \`package.json\` using \`ftp_get_contents "package.json"\` to see dependencies.]`;
+    case 'hint_destructive_readonly':
+      return `[AI: Server is in READ-ONLY mode. Use \`ftp_sync --dryRun\` to simulate this deployment instead.]`;
+    default:
+      return null;
+  }
+}
+
 // Read version from package.json to avoid version drift (CODE-1)
-let SERVER_VERSION = "1.3.1";
+let SERVER_VERSION = "1.4.0";
 try {
   const pkg = JSON.parse(readFileSync(path.join(__dirname, 'package.json'), 'utf8'));
   SERVER_VERSION = pkg.version || SERVER_VERSION;
@@ -151,6 +186,7 @@ if (process.argv.includes("--init")) {
 
 let currentConfig = null;
 let currentProfile = null;
+let sessionHintShown = false;
 
 const DEFAULT_IGNORE_PATTERNS = [
   'node_modules/**',
@@ -786,11 +822,12 @@ function generateSemanticPreview(filesToChange) {
 const server = new Server(
   {
     name: "ftp-mcp-server",
-    version: SERVER_VERSION, // CODE-1: reads from package.json at startup
+    version: SERVER_VERSION,
   },
   {
     capabilities: {
       tools: {},
+      resources: {},
     },
   }
 );
@@ -1308,6 +1345,51 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
   };
 });
 
+server.setRequestHandler(ListResourcesRequestSchema, async () => {
+  return {
+    resources: [
+      {
+        uri: "mcp://instruction/server-state",
+        name: "Active Server Instruction & Context",
+        description: "Provides a real-time summary of the active connection profile, security constraints, and operational hints to optimize agent behavior.",
+        mimeType: "text/markdown"
+      }
+    ]
+  };
+});
+
+server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+  if (request.params.uri === "mcp://instruction/server-state") {
+    const isReadOnly = currentConfig?.readOnly || false;
+    const protocol = currentConfig?.host?.startsWith('sftp://') ? 'SFTP' : 'FTP';
+    
+    const content = `# ftp-mcp Server Context (Agent Guide)
+**Current Version:** ${SERVER_VERSION}
+**Active Profile:** ${currentProfile || 'Environment Variables'}
+**Connection Mode:** ${protocol}
+**Security Status:** ${isReadOnly ? 'READ-ONLY (Destructive operations disabled)' : 'READ-WRITE'}
+
+## 💡 Operational Recommendations:
+1. **Prefer Patches**: Use \`ftp_patch_file\` instead of \`ftp_put_contents\` for existing files to minimize token usage and bandwidth.
+2. **Batch for Speed**: Use \`ftp_batch_upload\` and \`ftp_batch_download\` for multi-file operations.
+3. **Workspace Context**: If this is a new codebase, run \`ftp_analyze_workspace "."\` to identify framework patterns.
+4. **Safety**: Server uses automatic SHA-256 drift protection in snapshots. Use \`ftp_rollback\` if a refactor goes wrong.
+
+[END OF SYSTEM INSTRUCTION]`;
+
+    return {
+      contents: [
+        {
+          uri: request.params.uri,
+          mimeType: "text/markdown",
+          text: content
+        }
+      ]
+    };
+  }
+  throw new Error(`Resource not found: ${request.params.uri}`);
+});
+
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   if (request.params.name === "ftp_list_deployments") {
     try {
@@ -1443,10 +1525,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         warning = "\n⚠️ SECURITY WARNING: You are connecting to a production profile using insecure FTP. SFTP is strongly recommended.";
       }
 
+      let hint = "";
+      if (!sessionHintShown) {
+        hint = `\n\n${getAISuggestion('hint_connected')}`;
+        sessionHintShown = true;
+      }
+
       return {
         content: [{
           type: "text",
-          text: `Connected to profile: ${profile || currentProfile || 'environment variables'}\nHost: ${currentConfig.host}${warning}`
+          text: `Connected to profile: ${profile || currentProfile || 'environment variables'}\nHost: ${currentConfig.host}${warning}${hint}`
         }]
       };
     } catch (error) {
@@ -1525,14 +1613,26 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const sliced = files.slice(offset, offset + limit);
 
           const formatted = sliced.map(f => {
-            const type = (useSFTP ? f.type === 'd' : f.isDirectory) ? 'DIR ' : 'FILE';
+            const isDir = (useSFTP ? f.type === 'd' : f.isDirectory);
+            const icon = isDir ? ICON.DIR : ICON.FILE;
+            const label = isDir ? '[DIR] ' : '[FILE]';
+            
+            let marker = "";
+            const nameLower = f.name.toLowerCase();
+            if (['package.json', 'composer.json', 'requirements.txt', 'pyproject.toml', 'go.mod'].includes(nameLower)) marker = ` ${ICON.PKG}`;
+            else if (nameLower.includes('config') || nameLower.endsWith('.conf') || nameLower.endsWith('.yaml') || nameLower.endsWith('.yml')) marker = ` ${ICON.CONFIG}`;
+            else if (isSecretFile(f.name)) marker = ` ${ICON.SECRET}`;
+            else if (nameLower.endsWith('.bak') || nameLower.endsWith('.tmp') || nameLower.startsWith('~')) marker = ` ${ICON.BACKUP}`;
+
             const rights = useSFTP && f.rights ? `, ${f.rights.user || ''}${f.rights.group || ''}${f.rights.other || ''}` : '';
-            return `${type} ${f.name} (${f.size} bytes${rights})`;
+            return `${icon}${marker} ${label} ${f.name} (${f.size} bytes${rights})`;
           }).join('\n');
 
           const paginationInfo = `\n\nShowing ${offset + 1} to ${Math.min(offset + limit, total)} of ${total} items.`;
+          const hint = total > 0 && sliced.some(f => f.name === 'package.json') ? `\n\n${getAISuggestion('hint_list_config')}` : "";
+
           return {
-            content: [{ type: "text", text: (formatted || "Empty directory") + (total > limit ? paginationInfo : '') }]
+            content: [{ type: "text", text: (formatted || "Empty directory") + (total > limit ? paginationInfo : '') + hint }]
           };
         }
 
@@ -1850,8 +1950,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
 
           const paginationInfo = `\n\nShowing ${offset + 1} to ${Math.min(offset + limit, total)} of ${total} matches.`;
+          const hint = total === 0 ? `\n\n[AI: No matches found. Suggested fix: Try a broader wildcard pattern like \`*\` or verify your current \`path\` is correct.]` : "";
           return {
-            content: [{ type: "text", text: (formatted || "No matches found") + (total > limit ? paginationInfo : '') }]
+            content: [{ type: "text", text: (formatted || "No matches found") + (total > limit ? paginationInfo : '') + hint }]
           };
         }
 
@@ -2407,8 +2508,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     return response;
   } catch (error) {
     console.error(`[Fatal Tool Error] ${request.params.name}:`, error);
+    let suggestion = "";
+    const nameLower = error.message.toLowerCase();
+    if (nameLower.includes('enoent') || nameLower.includes('not found')) {
+      suggestion = `\n\n${getAISuggestion('error_enoent', { path: request.params.arguments?.path || request.params.arguments?.remotePath || 'target' })}`;
+    } else if (nameLower.includes('permission') || nameLower.includes('eacces')) {
+      suggestion = `\n\n${getAISuggestion('error_permission', { path: request.params.arguments?.path || request.params.arguments?.remotePath || 'target' })}`;
+    }
+
     return {
-      content: [{ type: "text", text: `Error: ${error.message}` }],
+      content: [{ type: "text", text: `Error: ${error.message}${suggestion}` }],
       isError: true
     };
   } finally {
