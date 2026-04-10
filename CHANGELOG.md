@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.5.2] - 2026-04-10
+
+### Fixed
+- **Infinite Recursion / CWD State Leak**: Fixed a critical bug in `basic-ftp` during live syncing where automatic directory creation (`ensureDir`) heavily mutated the Current Working Directory (CWD). Operations like `ftp_sync` and `ftp_upload` now actively preserve and reset to the initial remote directory context directly after folder creation, completely stopping multi-layered infinite nesting issues.
+- **Cache Invalidation**: Fixed a bug where dynamic exclusion patterns (e.g. anti-recursion blocks dynamically applied during syncs) were not forcing a minimatch cache refresh, leading to missed ignores.
+
 ## [1.5.1] - 2026-04-09
 
 ### Added

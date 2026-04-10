@@ -333,6 +333,9 @@ const ProfileConfigSchema = z.object({
   password: z.string().optional(),
   port: z.union([z.string(), z.number()]).optional(),
   secure: z.union([z.boolean(), z.literal("implicit")]).optional(),
+  secureOptions: z.record(z.any()).optional(),
+  verbose: z.boolean().optional(),
+  timeout: z.number().optional(),
   readOnly: z.boolean().optional(),
   privateKey: z.string().optional(),
   passphrase: z.string().optional(),
@@ -396,8 +399,9 @@ async function loadFTPConfig(profileName = null, forceEnv = false) {
 
 function getPort(host, configPort) {
   if (configPort) return parseInt(configPort, 10);
-  // LOW-4: Use strict prefix check, not includes() which matches e.g. "mysftp-server.com"
+  // LOW-4: Use strict prefix check
   if (host && host.startsWith('sftp://')) return 22;
+  if (host && host.startsWith('ftp://')) return 21;
   return 21;
 }
 
@@ -409,13 +413,32 @@ function isSFTP(host) {
 async function connectFTP(config) {
   const client = new FTPClient();
   client.ftp.verbose = false;
+  
+  if (config.verbose) {
+    client.ftp.log = (msg) => {
+      server.sendLoggingMessage({
+        level: "debug",
+        data: { message: `[FTP-RAW] ${msg}` }
+      });
+    };
+  }
+
   await client.access({
-    host: config.host,
+    host: config.host.replace('ftp://', '').replace('sftp://', ''), // Strip protocol for basic-ftp
     user: config.user,
     password: config.password,
     port: getPort(config.host, config.port),
-    secure: config.secure || false
+    secure: config.secure || false,
+    secureOptions: config.secureOptions || { rejectUnauthorized: false }, // Default to false for easy dev if not specified
+    timeout: config.timeout || 30000 // 30s connection timeout
   });
+  
+  try {
+    client._initialPwd = await client.pwd();
+  } catch (e) {
+    client._initialPwd = '/'; // fallback if pwd fails
+  }
+
   return client;
 }
 
@@ -657,6 +680,31 @@ async function syncFiles(client, useSFTP, localPath, remotePath, direction, igno
     ignorePatterns = await loadIgnorePatterns(localPath);
     basePath = localPath;
     _isTopLevel = true;
+
+    // --- ANTI-RECURSION GUARD ---
+    // If we're syncing the current directory (.), and the remote target is a local folder (e.g. 'FlowdexMCP_LiveTest'),
+    // we MUST ignore the remote target folder locally so we don't upload it into itself forever.
+    const resolvedLocal = path.resolve(localPath);
+    // Rough check: if remotePath is just a folder name (no slashes) or a relative path, ignore it
+    if (remotePath && typeof remotePath === 'string' && !remotePath.startsWith('/')) {
+        const firstFolder = remotePath.split('/')[0];
+        if (firstFolder && firstFolder !== '.') {
+            ignorePatterns.push(firstFolder);
+            ignorePatterns.push(`${firstFolder}/**`);
+            
+            // Re-instantiate the Ignore instance since we appended pattern strings
+            if (ignorePatterns._ig) delete ignorePatterns._ig;
+
+            server.notification({
+                method: "notifications/message",
+                params: {
+                  level: "info",
+                  data: { message: `[SYNC GUARD] Excluded target '${firstFolder}' from local sync to prevent infinite recursion.` }
+                }
+            });
+        }
+    }
+
     if (useManifest) await syncManifestManager.load();
     
     // Initialize progress tracking if a token is provided
@@ -675,6 +723,7 @@ async function syncFiles(client, useSFTP, localPath, remotePath, direction, igno
 
   if (extraExclude.length > 0) {
     ignorePatterns = [...ignorePatterns, ...extraExclude];
+    if (ignorePatterns._ig) delete ignorePatterns._ig;
   }
 
   if (direction === 'upload' || direction === 'both') {
@@ -704,6 +753,7 @@ async function syncFiles(client, useSFTP, localPath, remotePath, direction, igno
               await client.mkdir(remoteFilePath, true);
             } else {
               await client.ensureDir(remoteFilePath);
+              if (client._initialPwd) await client.cd(client._initialPwd).catch(() => {});
             }
           }
           const subStats = await syncFiles(client, useSFTP, localFilePath, remoteFilePath, direction, ignorePatterns, basePath, extraExclude, dryRun, useManifest, false, progressState);
@@ -726,9 +776,18 @@ async function syncFiles(client, useSFTP, localPath, remotePath, direction, igno
 
           if (shouldUpload) {
             try {
-              const remoteStat = useSFTP
-                ? await client.stat(remoteFilePath)
-                : (await client.list(remotePath)).find(f => f.name === file.name);
+              let remoteStat = undefined;
+              if (useSFTP) {
+                  remoteStat = await client.stat(remoteFilePath).catch(() => undefined);
+              } else {
+                  // To avoid 1,000 MLSD calls, we fetch the directory list once if not cached
+                  let dirList = getCached(`sync-${client.ftp?.host || 'local'}`, 'LIST', remotePath);
+                  if (!dirList) {
+                      dirList = await client.list(remotePath).catch(() => []);
+                      setCached(`sync-${client.ftp?.host || 'local'}`, 'LIST', remotePath, dirList);
+                  }
+                  remoteStat = dirList.find(f => f.name === file.name);
+              }
 
               if (remoteStat) {
                 const remoteTime = remoteStat.modifyTime || remoteStat.modifiedAt || new Date(remoteStat.rawModifiedAt);
@@ -2485,8 +2544,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const txIdUpload = await snapshotManager.createSnapshot(client, useSFTP, [remotePath]);
 
           if (useSFTP) {
+            await client.mkdir(path.dirname(remotePath), true).catch(() => {});
             await client.put(localPath, remotePath);
           } else {
+            const dirName = remotePath.split('/').slice(0, -1).join('/');
+            if (dirName && dirName !== '.') {
+                 await client.ensureDir(dirName).catch(() => {});
+                 await client.cd(client._initialPwd || '/').catch(() => {}); // reset to root
+            }
             await client.uploadFrom(localPath, remotePath);
           }
 
@@ -2548,6 +2613,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             await client.mkdir(path, true);
           } else {
             await client.ensureDir(path);
+            if (client._initialPwd) await client.cd(client._initialPwd).catch(() => {});
           }
 
           return {
