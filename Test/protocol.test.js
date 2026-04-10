@@ -271,5 +271,31 @@ describe('Protocol Gold Standard — Feature & Edge Case Tests', () => {
             });
             expect(found).toBe(true);
         }, 10000); // 10s timeout
+
+        it('should handle batch uploads to deeply nested non-existent paths', async () => {
+            const f1Path = path.join(process.cwd(), 'Test', 'protocol-deep-1.txt');
+            await fs.writeFile(f1Path, 'deep batch content');
+
+            const res = await executeRequest('tools/call', {
+                name: 'ftp_batch_upload',
+                arguments: {
+                    files: [{
+                        localPath: f1Path,
+                        remotePath: 'p1/p2/p3/deep-batch.txt'
+                    }]
+                }
+            });
+
+            expect(res.result.isError).toBeUndefined();
+            
+            // Verify file exists at deep path
+            const listRes = await executeRequest('tools/call', {
+                name: 'ftp_list',
+                arguments: { path: 'p1/p2/p3' }
+            });
+            expect(listRes.result.content[0].text).toContain('deep-batch.txt');
+
+            await fs.unlink(f1Path);
+        });
     });
 });

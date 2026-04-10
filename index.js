@@ -313,6 +313,45 @@ function assertSafeRemotePath(remotePath) {
   }
 }
 
+/**
+ * Ensures that a specific remote directory exists.
+ * For standard FTP, this utility also handles the crucial reset of the 
+ * Current Working Directory (CWD) to prevent implicit state leakage.
+ */
+async function safeMkdir(client, useSFTP, remotePath) {
+  if (!remotePath || remotePath === '.' || remotePath === '/') return;
+
+  if (useSFTP) {
+    // SFTP mkdir with recursive: true
+    await client.mkdir(remotePath, true).catch(() => {});
+  } else {
+    // FTP ensureDir switches CWD; we MUST reset it.
+    try {
+      await client.ensureDir(remotePath);
+      if (client._initialPwd) {
+        await client.cd(client._initialPwd).catch(() => {});
+      }
+    } catch (e) {
+      // Some servers might error if directory already exists or permissions are weird
+    }
+  }
+}
+
+/**
+ * Ensures that the parent directory structure of a remote file path exists.
+ */
+async function ensureRemoteDir(client, useSFTP, remotePath) {
+  // remotePath could be a filename or a path like "dir/subdir/file.js"
+  // We extract the directory portion using forward-slash splitting.
+  const parts = remotePath.split('/');
+  if (parts.length <= 1) return; // Root or simple filename, nothing to ensure
+  
+  const dirName = parts.slice(0, -1).join('/');
+  if (!dirName || dirName === '.' || dirName === '/') return;
+
+  await safeMkdir(client, useSFTP, dirName);
+}
+
 function shouldIgnore(filePath, ignorePatterns, basePath) {
   const relativePath = path.relative(basePath, filePath).replace(/\\/g, '/');
 
@@ -413,7 +452,7 @@ function isSFTP(host) {
 async function connectFTP(config) {
   const client = new FTPClient();
   client.ftp.verbose = false;
-  
+
   if (config.verbose) {
     client.ftp.log = (msg) => {
       server.sendLoggingMessage({
@@ -432,7 +471,7 @@ async function connectFTP(config) {
     secureOptions: config.secureOptions || { rejectUnauthorized: false }, // Default to false for easy dev if not specified
     timeout: config.timeout || 30000 // 30s connection timeout
   });
-  
+
   try {
     client._initialPwd = await client.pwd();
   } catch (e) {
@@ -535,7 +574,7 @@ async function getClient(config) {
       telemetry.activeConnections++;
 
       client._isSFTP = useSFTP;
-      
+
       // Silence MaxListenersExceededWarning during high-activity syncs/sessions
       if (typeof client.setMaxListeners === 'function') {
         client.setMaxListeners(100);
@@ -550,7 +589,7 @@ async function getClient(config) {
         async execute(task) {
           // Use a simple promise chain to serialize operations on this client
           const result = this.promiseQueue.then(() => task(this.client));
-          this.promiseQueue = result.catch(() => {}); // Continue queue even on error
+          this.promiseQueue = result.catch(() => { }); // Continue queue even on error
           return result;
         }
       };
@@ -684,29 +723,30 @@ async function syncFiles(client, useSFTP, localPath, remotePath, direction, igno
     // --- ANTI-RECURSION GUARD ---
     // If we're syncing the current directory (.), and the remote target is a local folder (e.g. 'FlowdexMCP_LiveTest'),
     // we MUST ignore the remote target folder locally so we don't upload it into itself forever.
+    // This caused more issues than I'm willing to admit.
     const resolvedLocal = path.resolve(localPath);
     // Rough check: if remotePath is just a folder name (no slashes) or a relative path, ignore it
     if (remotePath && typeof remotePath === 'string' && !remotePath.startsWith('/')) {
-        const firstFolder = remotePath.split('/')[0];
-        if (firstFolder && firstFolder !== '.') {
-            ignorePatterns.push(firstFolder);
-            ignorePatterns.push(`${firstFolder}/**`);
-            
-            // Re-instantiate the Ignore instance since we appended pattern strings
-            if (ignorePatterns._ig) delete ignorePatterns._ig;
+      const firstFolder = remotePath.split('/')[0];
+      if (firstFolder && firstFolder !== '.') {
+        ignorePatterns.push(firstFolder);
+        ignorePatterns.push(`${firstFolder}/**`);
 
-            server.notification({
-                method: "notifications/message",
-                params: {
-                  level: "info",
-                  data: { message: `[SYNC GUARD] Excluded target '${firstFolder}' from local sync to prevent infinite recursion.` }
-                }
-            });
-        }
+        // Re-instantiate the Ignore instance since we appended pattern strings
+        if (ignorePatterns._ig) delete ignorePatterns._ig;
+
+        server.notification({
+          method: "notifications/message",
+          params: {
+            level: "info",
+            data: { message: `[SYNC GUARD] Excluded target '${firstFolder}' from local sync to prevent infinite recursion.` }
+          }
+        });
+      }
     }
 
     if (useManifest) await syncManifestManager.load();
-    
+
     // Initialize progress tracking if a token is provided
     if (progressState && progressState.token) {
       server.notification({
@@ -749,12 +789,7 @@ async function syncFiles(client, useSFTP, localPath, remotePath, direction, igno
       try {
         if (file.isDirectory()) {
           if (!dryRun) {
-            if (useSFTP) {
-              await client.mkdir(remoteFilePath, true);
-            } else {
-              await client.ensureDir(remoteFilePath);
-              if (client._initialPwd) await client.cd(client._initialPwd).catch(() => {});
-            }
+            await safeMkdir(client, useSFTP, remoteFilePath);
           }
           const subStats = await syncFiles(client, useSFTP, localFilePath, remoteFilePath, direction, ignorePatterns, basePath, extraExclude, dryRun, useManifest, false, progressState);
           stats.uploaded += subStats.uploaded;
@@ -778,15 +813,15 @@ async function syncFiles(client, useSFTP, localPath, remotePath, direction, igno
             try {
               let remoteStat = undefined;
               if (useSFTP) {
-                  remoteStat = await client.stat(remoteFilePath).catch(() => undefined);
+                remoteStat = await client.stat(remoteFilePath).catch(() => undefined);
               } else {
-                  // To avoid 1,000 MLSD calls, we fetch the directory list once if not cached
-                  let dirList = getCached(`sync-${client.ftp?.host || 'local'}`, 'LIST', remotePath);
-                  if (!dirList) {
-                      dirList = await client.list(remotePath).catch(() => []);
-                      setCached(`sync-${client.ftp?.host || 'local'}`, 'LIST', remotePath, dirList);
-                  }
-                  remoteStat = dirList.find(f => f.name === file.name);
+                // To avoid 1,000 MLSD calls, we fetch the directory list once if not cached
+                let dirList = getCached(`sync-${client.ftp?.host || 'local'}`, 'LIST', remotePath);
+                if (!dirList) {
+                  dirList = await client.list(remotePath).catch(() => []);
+                  setCached(`sync-${client.ftp?.host || 'local'}`, 'LIST', remotePath, dirList);
+                }
+                remoteStat = dirList.find(f => f.name === file.name);
               }
 
               if (remoteStat) {
@@ -1455,7 +1490,7 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
   if (request.params.uri === "mcp://instruction/server-state") {
     const isReadOnly = currentConfig?.readOnly || false;
     const protocol = currentConfig?.host?.startsWith('sftp://') ? 'SFTP' : 'FTP';
-    
+
     const content = `# ftp-mcp Server Context (Agent Guide)
 **Current Version:** ${SERVER_VERSION}
 **Active Profile:** ${currentProfile || 'Environment Variables'}
@@ -1498,7 +1533,7 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
     } catch (e) {
       throw new Error(`Policy Violation: ${e.message}`);
     }
-    
+
     try {
       const entry = await getClient(currentConfig);
       const content = await entry.execute(async (client) => {
@@ -1822,28 +1857,28 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   try {
     const entry = await getClient(currentConfig);
-  const client = entry.client;
-  const useSFTP = client._isSFTP;
-  const poolKey = getPoolKey(currentConfig);
-  const cmdName = request.params.name;
-  const isDestructive = ["ftp_deploy", "ftp_put_contents", "ftp_batch_upload", "ftp_sync", "ftp_upload", "ftp_delete", "ftp_mkdir", "ftp_rmdir", "ftp_chmod", "ftp_rename", "ftp_copy", "ftp_patch_file"].includes(cmdName);
+    const client = entry.client;
+    const useSFTP = client._isSFTP;
+    const poolKey = getPoolKey(currentConfig);
+    const cmdName = request.params.name;
+    const isDestructive = ["ftp_deploy", "ftp_put_contents", "ftp_batch_upload", "ftp_sync", "ftp_upload", "ftp_delete", "ftp_mkdir", "ftp_rmdir", "ftp_chmod", "ftp_rename", "ftp_copy", "ftp_patch_file"].includes(cmdName);
 
-  const policyEngine = new PolicyEngine(currentConfig || {});
+    const policyEngine = new PolicyEngine(currentConfig || {});
 
-  if (isDestructive) {
-    if (currentConfig.readOnly) {
-      const errorResp = {
-        content: [{ type: "text", text: `Error: Profile '${currentProfile}' is configured in readOnly mode. Destructive actions are disabled.` }],
-        isError: true
-      };
-      await auditLog(cmdName, request.params.arguments, 'failed', currentProfile, 'readOnly mode violation');
-      return errorResp;
+    if (isDestructive) {
+      if (currentConfig.readOnly) {
+        const errorResp = {
+          content: [{ type: "text", text: `Error: Profile '${currentProfile}' is configured in readOnly mode. Destructive actions are disabled.` }],
+          isError: true
+        };
+        await auditLog(cmdName, request.params.arguments, 'failed', currentProfile, 'readOnly mode violation');
+        return errorResp;
+      }
+      invalidatePoolCache(poolKey);
     }
-    invalidatePoolCache(poolKey);
-  }
 
-  const response = await entry.execute(async (client) => {
-    switch (cmdName) {
+    const response = await entry.execute(async (client) => {
+      switch (cmdName) {
         case "ftp_list": {
           const path = request.params.arguments?.path || ".";
           const limit = request.params.arguments?.limit || 100;
@@ -1863,7 +1898,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             const isDir = (useSFTP ? f.type === 'd' : f.isDirectory);
             const icon = isDir ? ICON.DIR : ICON.FILE;
             const label = isDir ? '[DIR] ' : '[FILE]';
-            
+
             let marker = "";
             const nameLower = f.name.toLowerCase();
             if (['package.json', 'composer.json', 'requirements.txt', 'pyproject.toml', 'go.mod'].includes(nameLower)) marker = ` ${ICON.PKG}`;
@@ -1976,6 +2011,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
           if (createBackup) {
             const backupPath = `${filePath}.bak`;
+            await ensureRemoteDir(client, useSFTP, backupPath);
             if (useSFTP) {
               const buffer = Buffer.from(content, 'utf8');
               await client.put(buffer, backupPath);
@@ -1985,6 +2021,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             }
           }
 
+          await ensureRemoteDir(client, useSFTP, filePath);
           if (useSFTP) {
             const buffer = Buffer.from(patchedContent, 'utf8');
             await client.put(buffer, filePath);
@@ -2008,6 +2045,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
 
           const txId = await snapshotManager.createSnapshot(client, useSFTP, [filePath]);
+
+          await ensureRemoteDir(client, useSFTP, filePath);
 
           if (useSFTP) {
             const buffer = Buffer.from(content, 'utf8');
@@ -2359,6 +2398,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               continue;
             }
             try {
+              await ensureRemoteDir(client, useSFTP, file.remotePath);
               if (useSFTP) {
                 await client.put(file.localPath, file.remotePath);
               } else {
@@ -2543,15 +2583,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
           const txIdUpload = await snapshotManager.createSnapshot(client, useSFTP, [remotePath]);
 
+          await ensureRemoteDir(client, useSFTP, remotePath);
+
           if (useSFTP) {
-            await client.mkdir(path.dirname(remotePath), true).catch(() => {});
             await client.put(localPath, remotePath);
           } else {
-            const dirName = remotePath.split('/').slice(0, -1).join('/');
-            if (dirName && dirName !== '.') {
-                 await client.ensureDir(dirName).catch(() => {});
-                 await client.cd(client._initialPwd || '/').catch(() => {}); // reset to root
-            }
             await client.uploadFrom(localPath, remotePath);
           }
 
@@ -2609,12 +2645,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         case "ftp_mkdir": {
           const { path } = request.params.arguments;
 
-          if (useSFTP) {
-            await client.mkdir(path, true);
-          } else {
-            await client.ensureDir(path);
-            if (client._initialPwd) await client.cd(client._initialPwd).catch(() => {});
-          }
+          await safeMkdir(client, useSFTP, path);
 
           return {
             content: [{ type: "text", text: `Successfully created directory ${path}` }]
@@ -2681,6 +2712,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
           const txId = await snapshotManager.createSnapshot(client, useSFTP, [oldPath, newPath]);
 
+          await ensureRemoteDir(client, useSFTP, newPath);
           await client.rename(oldPath, newPath);
 
           return {

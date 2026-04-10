@@ -28,6 +28,7 @@ test_output.log
 IMPROVEMENTS.md
 TECHNICAL_DEBT.md
 SECURITY_AUDIT.md
+TEST_SUMMARY.md
 *.tmp
 *.txt
 

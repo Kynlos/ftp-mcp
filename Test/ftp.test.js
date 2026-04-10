@@ -198,4 +198,31 @@ describe('FTP MCP Comprehensive E2E Test Suite', () => {
     expect(read.result.content[0].text).toContain('Hello MCP!');
     expect(read.result.content[0].text).not.toContain('Hello World!');
   });
+
+  it('Should handle deeply nested paths in mutation tools (Hardening)', async () => {
+    const deepPath = 'deeply/nested/folder/structure/test.txt';
+    
+    // 1. Put contents (auto-creates folders)
+    const resPut = await executeMCP('ftp_put_contents', { path: deepPath, content: 'hardened' });
+    expect(resPut.result.isError).toBeUndefined();
+
+    // 2. Verify file exists
+    const resList = await executeMCP('ftp_list', { path: 'deeply/nested/folder/structure' });
+    expect(resList.result.content[0].text).toContain('test.txt');
+
+    // 3. Patch the nested file
+    const patchStr = `
+--- ${path.basename(deepPath)}
++++ ${path.basename(deepPath)}
+@@ -1 +1 @@
+-hardened
++hardened-and-patched
+`;
+    const resPatch = await executeMCP('ftp_patch_file', { path: deepPath, patch: patchStr });
+    expect(resPatch.result.isError).toBeUndefined();
+
+    // 4. Verify patch
+    const resGet = await executeMCP('ftp_get_contents', { path: deepPath });
+    expect(resGet.result.content[0].text).toContain('hardened-and-patched');
+  });
 });
